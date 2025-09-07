@@ -28,7 +28,7 @@ from .ui import (
 HELP_TEXT = (
     "Type in natural language (or use commands):\n"
     "  – e.g. 'AL 1st to 3rd June', 'sick leave on 10 Sep', '5 and 7 Aug mc'\n"
-    "Commands: /show, /clear, /deregister, /generate, /comment, /help, /back, /quit"
+    "Commands: /show, /clear, /deregister, /generate, /comment, /help, /back, /email, /quit"
 )
 
 

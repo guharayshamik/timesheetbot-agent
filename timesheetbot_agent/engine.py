@@ -2,6 +2,7 @@
 from __future__ import annotations
 import logging, re
 from pathlib import Path
+from . import mailer
 from datetime import datetime
 from typing import List, Tuple, Optional, Dict, Any, Sequence
 
@@ -332,6 +333,80 @@ class Engine:
             save_session(sess)
             return [f"📝 Added remark “{comment}” for {start_key}. You can `/show` or `/generate`."]
 
+        # ---- EMAIL command
+        if re.search(r"^/email\b", text, flags=re.I):
+            sess_meta = load_session()
+            path_str = sess_meta.get("last_generated_path")
+            meta = sess_meta.get("last_generated_meta", {})
+            if not path_str:
+                return ["⚠️ No generated file found. Please `/generate` the timesheet first."]
+
+            attachment = Path(path_str)
+            if not attachment.exists():
+                return [f"⚠️ I can't find the file on disk: {attachment}. Please `/generate` again."]
+
+            # Recipient: if user typed an email with the command, use that.
+            #m = re.search(r"/email\\s+(\\S+@\\S+)", text, flags=re.I)
+            #m = re.search(r"/email\s+(\S+@\S+)", text, flags=re.I)
+            m = re.search(r"/email\s+([^\s,;]+@[^\s,;]+)", text, flags=re.I)
+
+            to_addr = None
+            if m:
+                to_addr = m.group(1)
+            else:
+                # fallback to stored manager email if present
+                to_addr = (self.profile.get("manager_email") or "").strip()
+
+            if not to_addr:
+                return [
+                    "⚠️ I don't know who to send this to. Either:",
+                    "  • type `/email manager@yourorg.com`, or",
+                    "  • add `manager_email` to your profile/registration.",
+                ]
+
+            month = meta.get("month") or "Your"
+            year = meta.get("year") or datetime.now().year
+            employee = self.profile.get("name") or "Employee"
+
+            # NEW: personalize greeting from Reporting Officer's first name (saved during registration)
+            mgr_first = (self.profile.get("manager_first_name") or "").strip()
+            greeting = f"Hi {mgr_first}," if mgr_first else "Hi,"
+
+            subject = f"{month} {year} Timesheet — {employee}"
+            body_lines = [
+                greeting,
+                "",
+                f"Please find attached my {month} {year} timesheet.",
+                "",
+                "Regards,",
+                employee,
+            ]
+            # Use CRLF to be safe across clients; mailer handles AppleScript 'return' too
+            body = "\r\n".join(body_lines)
+
+
+
+            try:
+                mailer.compose_with_best_available(
+                    to=[to_addr],
+                    subject=subject,
+                    body=body,
+                    attachment=attachment,
+                    cc=[self.profile.get("email")] if self.profile.get("email") else None,
+                )
+                return [
+                    "✉️ Opening your email client with the timesheet attached…",
+                    f"To: {to_addr}",
+                    f"Subject: {subject}",
+                    "✅ Review and hit Send.",
+                ]
+            except Exception as e:
+                return [
+                    f"❌ Couldn't open a compose window automatically ({e}).",
+                    f"Please email this file manually: {attachment}",
+                ]
+
+
         # ---- leave type?
         leave_type = None
         for k, canon in _LEAVE_SYNONYMS.items():
@@ -500,6 +575,7 @@ class Engine:
                 f"- annual leave 11–13 {current_month[:3]}",
                 f"- sick leave on 10 {current_month[:3]}",
                 f"- /comment 11 {current_month[:3]} OIL",
+                f"- /email manager@yourorg.com",
             ]
         else:
             return [
@@ -529,8 +605,15 @@ class Engine:
 
         year = datetime.now().year
 
+        # Clear any previous "last generated" info up front
+        sess = load_session()
+        sess.pop("last_generated_path", None)
+        sess.pop("last_generated_meta", None)
+        save_session(sess)
+
         try:
             from .generators.govtech_excel import generate_cli as generate_excel_cli
+            path = None
             # Try new signature (with remarks). If package not updated yet, fall back.
             try:
                 path = generate_excel_cli(
@@ -552,6 +635,19 @@ class Engine:
                     public_holidays=PUBLIC_HOLIDAYS,
                 )
 
+            if not path:
+                raise RuntimeError("Generator did not return a file path")
+
+            sess = load_session()
+            sess["last_generated_path"] = str(path)
+            sess["last_generated_meta"] = {
+                "month": month,
+                "month_int": month_int,
+                "year": year,
+                "path": str(path),
+            }
+            save_session(sess)
+
             return [
                 "📊 Generating your timesheet…",
                 f"✅ Saved -> {path}",
@@ -560,9 +656,28 @@ class Engine:
 
         except Exception as e:
             import json
-            payload = {"profile": self.profile, "month": month, "leave_details": leave_details, "remarks": remarks}
+            payload = {
+                "profile": self.profile,
+                "month": month,
+                "leave_details": leave_details,
+                "remarks": remarks,
+            }
             fname = out_dir / f"{month}_timesheet_payload.json"
             fname.write_text(json.dumps(payload, indent=2))
+
+            # Record fallback artifact too
+            sess = load_session()
+            sess["last_generated_path"] = str(fname)
+            sess["last_generated_meta"] = {
+                "month": month,
+                "month_int": month_int,
+                "year": year,
+                "path": str(fname),
+                "fallback": True,
+                "error": str(e),
+            }
+            save_session(sess)
+
             return [
                 f"❌ Generator error: {e}. Falling back to JSON artifact.",
                 "📊 Generating your timesheet (fallback)…",

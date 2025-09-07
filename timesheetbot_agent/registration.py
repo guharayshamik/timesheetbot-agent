@@ -88,6 +88,14 @@ def run_registration_interactive() -> dict:
     client = _ask("Client (GovTech/Napta):", profile.get("client", "GovTech"), validator=_non_empty)
     govtech_project = _ask("GovTech Project (e.g., MOM–WINS):", profile.get("govtech_project", "MOM–WINS"), validator=_non_empty)
 
+    # NEW (minimal change): ask only for manager email
+    manager_email = _ask("Manager email (default recipient for /email)", profile.get("manager_email", ""), validator=_email)
+
+    # NEW (minimal change): auto-derive manager_first_name from reporting officer
+    manager_first_name = ""
+    if reporting_officer.strip():
+        manager_first_name = reporting_officer.strip().split()[0]
+
     profile.update({
         "name": name,
         "skill_level": skill_level,
@@ -95,13 +103,15 @@ def run_registration_interactive() -> dict:
         "group_specialization": group,
         "contractor": contractor,
         "po_ref": po_ref,
-        "po_date": po_date,                    # <- stored verbatim
+        "po_date": po_date,                    
         "description": description,
         "reporting_officer": reporting_officer,
         "email": email,
         "timesheet_preference": timesheet_preference,
         "client": client,
         "govtech_project": govtech_project,
+        "manager_email": manager_email,        # <- added
+        "manager_first_name": manager_first_name,  # <- derived, not prompted
     })
 
     save_profile(profile)

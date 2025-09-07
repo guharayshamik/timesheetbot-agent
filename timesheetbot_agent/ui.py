@@ -91,10 +91,10 @@ def _bullet_line(s: str, style: str = "bold green") -> Text:
 
 
 def show_vibrant_help() -> None:
-    """Pretty 'LLM mode ON + examples + commands' block."""
+    """Pretty 'Chat mode ON + examples + commands' block."""
 
     # Chip-like header
-    chip = Text.assemble(("⚡  LLM mode", "bold"), ("  ON", "bold bright_green"))
+    chip = Text.assemble(("⚡  Chat mode", "bold"), ("  ON", "bold bright_green"))
     console.print(
         Panel(chip, border_style="bright_green", padding=(0, 1), box=box.SQUARE)
     )
@@ -121,7 +121,7 @@ def show_vibrant_help() -> None:
 
     # Commands panel (include /comment)
     cmds = Text(
-        "/show   /clear   /deregister   /generate   /comment   /help   /back   /quit",
+        "/show   /clear   /deregister   /generate   /comment   /help   /back   /email   /quit",
         style="bold magenta",
     )
     console.print(
