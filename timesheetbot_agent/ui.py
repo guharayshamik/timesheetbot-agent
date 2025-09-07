@@ -1,19 +1,24 @@
 # timesheetbot_agent/ui.py
 from __future__ import annotations
-from typing import Iterable, Optional
+from typing import Iterable
 
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.prompt import Prompt
-from rich.box import ROUNDED
 from rich.text import Text
+from rich import box
+from rich.box import ROUNDED
 
 console = Console()
 
+# Default border color for our panels
 BORDER = "bright_blue"
 
+
+# ── Top banner ──────────────────────────────────────────────────────────────────
 def banner(profile_line: str) -> None:
+    """Show the welcome banner."""
     title = Text("Timesheet BOT agent — PALO IT", style="bold cyan")
     subtitle = Text(profile_line, style="dim")
     body = Text("I am here to assist in filling up your timesheet.", style="white")
@@ -28,17 +33,26 @@ def banner(profile_line: str) -> None:
         )
     )
 
+
+# ── Menu ────────────────────────────────────────────────────────────────────────
 def menu(title: str, options: list[str]) -> str:
-    table = Table(box=ROUNDED, show_header=False, expand=True, border_style=BORDER, padding=(0,1))
+    """Render a numbered menu and return the chosen option (as a string)."""
+    table = Table(
+        box=ROUNDED, show_header=False, expand=True, border_style=BORDER, padding=(0, 1)
+    )
     table.add_column(justify="center", style="bold")
     table.add_column()
     for i, label in enumerate(options, start=1):
         table.add_row(f"[cyan]{i}[/]", label)
     console.print(Panel.fit(table, title=title, border_style=BORDER, box=ROUNDED))
-    return Prompt.ask("[bold]Enter choice[/] (1–{n})".format(n=len(options)),
-                      choices=[str(i) for i in range(1, len(options)+1)],
-                      show_choices=False)
+    return Prompt.ask(
+        f"[bold]Enter choice[/] (1–{len(options)})",
+        choices=[str(i) for i in range(1, len(options) + 1)],
+        show_choices=False,
+    )
 
+
+# ── Message panels ──────────────────────────────────────────────────────────────
 def panel(msg: str) -> None:
     """Pretty-print a single message in a colored box based on its emoji/severity."""
     style = "white"
@@ -54,12 +68,69 @@ def panel(msg: str) -> None:
         style = "magenta"
     console.print(Panel(msg, border_style=style, box=ROUNDED))
 
+
 def panels(lines: Iterable[str]) -> None:
+    """Render a list of lines as individual panels."""
     for line in lines:
         panel(line)
 
+
 def input_prompt(prompt_text: str = "›") -> str:
+    """Unified input prompt (styled)."""
     return Prompt.ask(f"[bold cyan]{prompt_text}[/]")
 
+
 def note(msg: str) -> None:
+    """Dim, inline note."""
     console.print(f"[dim]{msg}[/]")
+
+
+# ── Vibrant help block (LLM chip + Examples + Commands) ─────────────────────────
+def _bullet_line(s: str, style: str = "bold green") -> Text:
+    return Text("• ", style="dim") + Text(s, style=style)
+
+
+def show_vibrant_help() -> None:
+    """Pretty 'LLM mode ON + examples + commands' block."""
+
+    # Chip-like header
+    chip = Text.assemble(("⚡  LLM mode", "bold"), ("  ON", "bold bright_green"))
+    console.print(
+        Panel(chip, border_style="bright_green", padding=(0, 1), box=box.SQUARE)
+    )
+
+    # Subtitle
+    console.print(Text("Describe your work/leave in plain English, e.g.:", style="bold cyan"))
+
+    # Examples panel
+    ex_tbl = Table.grid(padding=(0, 1))
+    ex_tbl.add_column()
+    ex_tbl.add_row(_bullet_line('"generate timesheet for August"'))
+    ex_tbl.add_row(_bullet_line('"annual leave 11–13 Aug"'))
+    ex_tbl.add_row(_bullet_line('"sick leave on 11 Aug"'))
+    console.print(
+        Panel(
+            ex_tbl,
+            title="Examples",
+            title_align="left",
+            border_style="cyan",
+            box=box.ROUNDED,
+            padding=(0, 1),
+        )
+    )
+
+    # Commands panel (include /comment)
+    cmds = Text(
+        "/show   /clear   /deregister   /generate   /comment   /help   /back   /quit",
+        style="bold magenta",
+    )
+    console.print(
+        Panel(
+            cmds,
+            title="Commands",
+            title_align="left",
+            border_style="magenta",
+            box=box.ROUNDED,
+            padding=(0, 1),
+        )
+    )

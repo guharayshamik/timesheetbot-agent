@@ -15,13 +15,20 @@ from .registration import run_registration_interactive
 from .engine import Engine
 
 # Pretty UI helpers (see timesheetbot_agent/ui.py)
-from .ui import banner, menu, input_prompt, panel, panels, note
-
+from .ui import (
+    banner,
+    menu,
+    input_prompt,
+    panel,
+    panels,
+    note,
+    show_vibrant_help,  # <— bring the vibrant help block into scope
+)
 
 HELP_TEXT = (
     "Type in natural language (or use commands):\n"
     "  – e.g. 'AL 1st to 3rd June', 'sick leave on 10 Sep', '5 and 7 Aug mc'\n"
-    "Commands: /show, /clear, /deregister, /generate, /help, /back, /quit"
+    "Commands: /show, /clear, /deregister, /generate, /comment, /help, /back, /quit"
 )
 
 
@@ -53,13 +60,8 @@ def govtech_loop(profile: dict) -> None:
     eng.reset_session()  # start fresh so old leaves aren’t carried over
 
     banner(f"{profile.get('name')} <{profile.get('email')}>")
-    note("LLM mode ON.")
-    note("Describe your work/leave in plain English, e.g.:")
-    note("• \"generate timesheet for August\"")
-    note("• \"annual leave 11–13 Aug\"")
-    note("• \"sick leave on 11 Aug\"")
-    note("")
-    note("Commands: /show, /clear, /deregister, /generate, /help, /back, /quit")
+    show_vibrant_help()
+    print()  # one blank line before the prompt
 
     while True:
         try:
@@ -101,7 +103,7 @@ def govtech_loop(profile: dict) -> None:
             panel("👋 Deregistered and session cleared. Returning to main menu.")
             return
 
-        # Hand over to engine (includes /generate handling)
+        # Hand over to engine (includes /generate handling and /comment)
         out_lines = eng.handle_text(cmd)
         panels(out_lines)
 
@@ -109,12 +111,13 @@ def govtech_loop(profile: dict) -> None:
 def napta_loop(profile: dict) -> None:
     banner(f"{profile.get('name')} <{profile.get('email')}>")
     panels(["(Napta flow coming soon) 🙏"])
-    # Keep loop minimal for now
+    # Minimal placeholder flow
     input_prompt("Press Enter to return…")
     panel("↩️  Back to main menu.")
 
 
 def main(argv: Optional[list] = None) -> int:
+    # Show top-level banner (no profile yet)
     banner("Timesheet BOT agent — PALO IT")
 
     while True:
@@ -150,8 +153,9 @@ def main(argv: Optional[list] = None) -> int:
         else:
             panel("Please pick 1–4.")
 
-    # Unreachable, but makes type-checkers happy
-    return 0
+    # Unreachable, but keeps type-checkers happy
+    # (The loop exits via returns above.)
+    # return 0
 
 
 if __name__ == "__main__":
