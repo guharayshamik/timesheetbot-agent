@@ -1,0 +1,33 @@
+# --- Python bytecode / extensions
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# --- Virtualenv & env files
+.venv/
+.env
+
+# --- Packaging / builds
+dist/
+build/
+*.egg-info/
+*.egg
+pip-wheel-metadata/
+
+# --- Test / tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+
+# --- OS & editors
+.DS_Store
+.idea/
+.vscode/
+.python-version
+
+# --- App data
+generated_timesheets/
