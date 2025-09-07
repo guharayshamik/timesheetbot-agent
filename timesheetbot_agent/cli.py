@@ -1,119 +1,136 @@
+# timesheetbot_agent/cli.py
 from __future__ import annotations
+
 import sys
 from typing import Optional
 
-from .storage import load_profile, save_profile, load_session, clear_session, clear_profile
+from .storage import (
+    load_profile,
+    save_profile,
+    load_session,
+    clear_session,
+    clear_profile,
+)
 from .registration import run_registration_interactive
 from .engine import Engine
 
-WELCOME = """\
-Welcome, I am your Timesheet BOT agent – PALO IT
-I am here to assist in filling up your timesheet.
-"""
+# Pretty UI helpers (see timesheetbot_agent/ui.py)
+from .ui import banner, menu, input_prompt, panel, panels, note
 
-MENU = """\
-Choose an option:
-1) Napta Timesheet
-2) GovTech Timesheet
-3) Registration
-4) Quit
-"""
 
-HELP = """\
-Type in natural language (or use commands):
-  – e.g. 'AL 1st to 3rd June', 'sick leave on 10 Sep', '5 and 7 Aug mc'
-Commands: /show, /clear, /deregister, /generate, /help, /back, /quit
-"""
+HELP_TEXT = (
+    "Type in natural language (or use commands):\n"
+    "  – e.g. 'AL 1st to 3rd June', 'sick leave on 10 Sep', '5 and 7 Aug mc'\n"
+    "Commands: /show, /clear, /deregister, /generate, /help, /back, /quit"
+)
 
-def _press_enter():
-    try:
-        input("\nPress Enter to continue… ")
-    except KeyboardInterrupt:
-        print()
-        sys.exit(0)
 
 def ensure_profile() -> dict:
     prof = load_profile()
     if not prof:
-        print("No registration found.")
+        panel("⚠️ No registration found. Let's get you set up.")
         prof = run_registration_interactive()
     return prof
 
+
+def show_help() -> None:
+    panels([HELP_TEXT])
+
+
+def show_session_box() -> None:
+    sess = load_session()
+    month = sess.get("month", "—")
+    leaves = sess.get("leave_details", [])
+    lines = [
+        f"Month: {month}",
+        f"Leave details: {leaves}",
+    ]
+    panels(lines)
+
+
 def govtech_loop(profile: dict) -> None:
-    print()
-    print(f"Using profile: {profile['name']} <{profile['email']}>")
+    eng = Engine(profile)
+    eng.reset_session()  # start fresh so old leaves aren’t carried over
 
-    engine = Engine(profile)
-    # start fresh so old leaves aren’t carried over
-    engine.reset_session()
-
-    print("\nLLM mode ON.")
-    print("Describe your work/leave in plain English, e.g.:")
-    print("• \"generate timesheet for August\"")
-    print("• \"annual leave 11–13 Aug\"")
-    print("• \"sick leave on 11 Aug\"")
-    print("\nType in natural language (or use commands):")
-    print("  – e.g. 'AL 1st to 3rd June', 'sick leave on 10 Sep', '5 and 7 Aug mc'")
-    print("Commands: /show, /clear, /deregister, /generate, /help, /back, /quit\n")
+    banner(f"{profile.get('name')} <{profile.get('email')}>")
+    note("LLM mode ON.")
+    note("Describe your work/leave in plain English, e.g.:")
+    note("• \"generate timesheet for August\"")
+    note("• \"annual leave 11–13 Aug\"")
+    note("• \"sick leave on 11 Aug\"")
+    note("")
+    note("Commands: /show, /clear, /deregister, /generate, /help, /back, /quit")
 
     while True:
         try:
-            s = input("› ").strip()
+            s = input_prompt("›")
         except (EOFError, KeyboardInterrupt):
-            print()
+            panel("👋 Bye!")
             return
 
         if not s:
             continue
 
-        # built-in commands
-        if s in ("/quit", "/q"):
+        cmd = s.strip()
+
+        # Core commands
+        if cmd in ("/quit", "/q"):
+            panel("👋 Bye!")
             sys.exit(0)
 
-        if s == "/back":
+        if cmd == "/back":
+            panel("↩️  Back to main menu.")
             return
 
-        if s == "/help":
-            print(HELP)
+        if cmd == "/help":
+            show_help()
             continue
 
-        if s == "/show":
-            print()
-            sess = load_session()
-            print("Month:", sess.get("month"))
-            print("Leave details:", sess.get("leave_details", []))
+        if cmd == "/show":
+            show_session_box()
             continue
 
-        if s == "/clear":
+        if cmd == "/clear":
             clear_session()
-            print("🧹 Session cleared.")
+            panel("🧹 Session cleared.")
             continue
 
-        if s == "/deregister":
+        if cmd == "/deregister":
             clear_profile()
             clear_session()
-            print("👋 Deregistered and session cleared. Returning to main menu.")
+            panel("👋 Deregistered and session cleared. Returning to main menu.")
             return
 
-        # hand over to engine (includes /generate handling)
-        for line in engine.handle_text(s):
-            print(line)
+        # Hand over to engine (includes /generate handling)
+        out_lines = eng.handle_text(cmd)
+        panels(out_lines)
+
+
+def napta_loop(profile: dict) -> None:
+    banner(f"{profile.get('name')} <{profile.get('email')}>")
+    panels(["(Napta flow coming soon) 🙏"])
+    # Keep loop minimal for now
+    input_prompt("Press Enter to return…")
+    panel("↩️  Back to main menu.")
+
 
 def main(argv: Optional[list] = None) -> int:
-    print(WELCOME)
+    banner("Timesheet BOT agent — PALO IT")
 
     while True:
-        print(MENU)
-        try:
-            choice = input("Enter choice (1–4): ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\nGoodbye! 👋")
-            return 0
+        choice = menu(
+            "Choose an option:",
+            [
+                "Napta Timesheet",
+                "GovTech Timesheet",
+                "Registration",
+                "Quit",
+            ],
+        )
 
         if choice == "1":
-            print("\n(Napta flow coming soon) 🙏")
-            _press_enter()
-            continue
+            profile = ensure_profile()
+            napta_loop(profile)
 
         elif choice == "2":
             profile = ensure_profile()
@@ -127,11 +144,15 @@ def main(argv: Optional[list] = None) -> int:
             run_registration_interactive()
 
         elif choice == "4":
-            print("Goodbye! 👋")
+            panel("Goodbye! 👋")
             return 0
 
         else:
-            print("Please pick 1–4.")
+            panel("Please pick 1–4.")
+
+    # Unreachable, but makes type-checkers happy
+    return 0
+
 
 if __name__ == "__main__":
     raise SystemExit(main())
