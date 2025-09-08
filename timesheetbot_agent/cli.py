@@ -1,13 +1,20 @@
-# timesheetbot_agent/cli.py
+# timesheetbot_agent/cli.py (top of file)
 from __future__ import annotations
-
+from .ui import console
 import sys
-from typing import Optional, List, Tuple
+from typing import Optional, List
 from datetime import datetime
-import re
 
+from .napta import NaptaClient
+from .ui import banner, panel, panels, input_prompt, show_vibrant_help 
 from . import fitnet
-from .ui import fitnet_header, fitnet_commands  # decorative helpers if present
+
+# Pretty UI helpers (safe optional imports)
+try:
+    from .ui import fitnet_header, fitnet_commands
+except Exception:
+    fitnet_header = None
+    fitnet_commands = None
 
 from .storage import (
     load_profile,
@@ -19,7 +26,6 @@ from .storage import (
 from .registration import run_registration_interactive
 from .engine import Engine
 
-# Pretty UI helpers (see timesheetbot_agent/ui.py)
 from .ui import (
     banner,
     menu,
@@ -29,6 +35,14 @@ from .ui import (
     note,
     show_vibrant_help,
 )
+
+from .napta import NaptaClient
+from .ui import banner, panel, panels, input_prompt, console
+from rich.text import Text
+from rich.panel import Panel
+from rich.table import Table
+from rich import box
+
 
 HELP_TEXT = (
     "Type in natural language (or use commands):\n"
@@ -76,7 +90,7 @@ def govtech_loop(profile: dict) -> None:
 
     while True:
         try:
-            s = input_prompt("›")
+            s = input_prompt("govtech_timesheet›")
         except (EOFError, KeyboardInterrupt):
             panel("👋 Bye!")
             return
@@ -120,12 +134,79 @@ def govtech_loop(profile: dict) -> None:
 
 
 # ------------------------------ Napta placeholder ----------------------------
+def _bullet_line(s: str, style: str = "bold green") -> Text:
+    return Text("• ", style="dim") + Text(s, style=style)
+
+def _show_napta_help_block() -> None:
+    chip = Text.assemble(("⚡  NAPTA chat mode", "bold"), ("  ON", "bold bright_green"))
+    console.print(Panel(chip, border_style="bright_green", padding=(0, 1), box=box.SQUARE))
+    console.print(Text("Describe your Napta action in plain English, e.g.:", style="bold cyan"))
+
+    ex_tbl = Table.grid(padding=(0, 1))
+    ex_tbl.add_column()
+    ex_tbl.add_row(_bullet_line("'all day worked' — keep current grid, just save"))
+    ex_tbl.add_row(_bullet_line("'all day 1d' — (planned) fill first row Mon–Fri with 1d each, then save"))
+    ex_tbl.add_row(_bullet_line("'/save' — Save this week (draft)"))
+    ex_tbl.add_row(_bullet_line("'/submit' — Submit this week for approval"))
+    ex_tbl.add_row(_bullet_line("'/submit month' — choose All weeks / 1st / 2nd / 3rd / 4th (5th if any)"))
+    console.print(Panel(ex_tbl, title="Examples", title_align="left",
+                        border_style="cyan", box=box.ROUNDED, padding=(0, 1)))
+    cmds = Text("/save   /submit   /save month   /submit month   /back   /quit", style="bold magenta")
+    console.print(Panel(cmds, title="Commands", title_align="left",
+                        border_style="magenta", box=box.ROUNDED, padding=(0, 1)))
+
+def _ask_week_choice() -> str:
+    """Return 'all' or '1'..'5'."""
+    console.print(Panel("Choose weeks for the **current month**:", border_style="cyan", box=box.ROUNDED))
+    while True:
+        ans = input_prompt("napta› weeks? (all / 1 / 2 / 3 / 4 / 5)")
+        t = ans.strip().lower()
+        if t in ("all", "1", "2", "3", "4", "5"):
+            return t
+        panel("⚠️ Please type: all / 1 / 2 / 3 / 4 / 5")
 
 def napta_loop(profile: dict) -> None:
     banner(f"{profile.get('name')} <{profile.get('email')}>")
-    panels(["(Napta flow coming soon) 🙏"])
-    input_prompt("Press Enter to return…")
-    panel("↩️  Back to main menu.")
+    client = NaptaClient()
+    panels([f"Napta auth status: {client.status()}"])
+    _show_napta_help_block()
+    panels([
+        "This uses your browser’s SSO cookies.",
+        "If a save/submit fails, please open https://app.napta.io in your browser and login once, then retry.",
+    ])
+
+    # Optional one-time mode line (we keep the flag for future, but no cell edits yet)
+    _ = input_prompt("napta› enter 'all day worked' or 'all day 1d' (optional, Enter to skip)").strip().lower()
+
+    while True:
+        cmd = input_prompt("napta› (/save, /submit, /save month, /submit month, /back, /quit)").strip().lower()
+        if not cmd:
+            continue
+        if cmd in ("/quit", "/q"):
+            panel("👋 Bye!"); sys.exit(0)
+        if cmd == "/back":
+            panel("↩️  Back to main menu."); return
+
+        if cmd == "/save":
+            ok, msg = client.save_current_week(all_day_1d=False)
+            panel(msg); continue
+
+        if cmd == "/submit":
+            ok, msg = client.submit_current_week()
+            panel(msg); continue
+
+        if cmd == "/save month":
+            wk = _ask_week_choice()  # 'all' / '1'..'5'
+            ok, msg = client.save_month_choice("all" if wk == "all" else int(wk))
+            panel(msg); continue
+
+        if cmd == "/submit month":
+            wk = _ask_week_choice()
+            # NOTE: “All weeks” path is fully automatic — no extra inputs.
+            ok, msg = client.submit_month_choice("all" if wk == "all" else int(wk))
+            panel(msg); continue
+
+        panel("⚠️ Unknown command. Try: /save, /submit, /save month, /submit month, /back, /quit")
 
 
 # ------------------------------ Fitnet flow ----------------------------------
@@ -196,11 +277,14 @@ def fitnet_loop(profile: dict) -> None:
     eng.reset_session()
 
     banner(f"{profile.get('name')} <{profile.get('email')}>")
-    try:
-        # If these helpers exist, they provide a nice header/help block.
-        fitnet_header()
-        fitnet_commands()
-    except Exception:
+    if fitnet_header:
+        try:
+            fitnet_header()
+            if fitnet_commands:
+                fitnet_commands()
+        except Exception:
+            pass
+    else:
         panels([
             "Fitnet (Leave) — safe preview by default.",
             "Commands: /login, /preview, /commit, /show, /clear, /help, /back, /quit",
@@ -210,6 +294,7 @@ def fitnet_loop(profile: dict) -> None:
             "  - /comment 11 Sep OIL",
             "Then run `/preview` to prefill Fitnet (no save), or `/commit` to save.",
         ])
+
     print()
 
     while True:
@@ -255,13 +340,36 @@ def fitnet_loop(profile: dict) -> None:
             continue
 
         # Fitnet login capture
+        # /login flow for non-technical users (device flow)
+        # /login (device flow — SSO, no secrets)
         if cmd == "/login":
             try:
-                path = fitnet.login_interactive()
-                panels([f"✅ Session captured to {path}", "You can now use /preview or /commit."])
-            except Exception as e:
-                panel(f"❌ Login capture failed: {e}")
+                ok, msg = client.device_login()
+                panel(msg)
+                if ok:
+                    try:
+                        me = client.whoami()
+                        panels([f"✅ User OK: {me.get('data', {}).get('id', 'unknown')}"])
+                    except Exception as e:
+                        panels([f"⚠️ Logged in but /user failed: {e}"])
+            except NaptaAuthError as e:
+                panels([f"❌ {e}", "Tip: /login set-client <PUBLIC_CLIENT_ID>"])
             continue
+
+        # optional: set the public client id once (if not shipped via env)
+        if cmd.startswith("/login set-client"):
+            parts = cmd.split()
+            if len(parts) == 3:
+                _, _, cid = parts
+                try:
+                    client.configure_device_client(cid)
+                    panels(["✅ Saved public client id. Now run /login."])
+                except NaptaAuthError as e:
+                    panels([f"❌ {e}"])
+            else:
+                panels(["⚠️ Usage: /login set-client <PUBLIC_CLIENT_ID>"])
+            continue
+
 
         # Preview / Commit actions
         if cmd == "/preview":
@@ -283,35 +391,25 @@ def main(argv: Optional[list] = None) -> int:
     banner("Timesheet BOT agent — PALO IT")
 
     while True:
-        choice = menu(
-            "Choose an option:",
-            [
-                "Napta Timesheet",
-                "GovTech Timesheet",
-                "Fitnet (Leave)",
-                "Registration",
-                "Quit",
-            ],
-        )
+        choice = menu("Choose an option:", [
+            "Napta Timesheet",
+            "GovTech Timesheet",
+            "Fitnet (Leave)",
+            "Registration",
+            "Quit",
+        ])
 
         if choice == "1":
             profile = ensure_profile()
             napta_loop(profile)
-
         elif choice == "2":
             profile = ensure_profile()
-            if not profile.get("client"):
-                profile["client"] = "GovTech"
-                save_profile(profile)
             govtech_loop(profile)
-
         elif choice == "3":
             profile = ensure_profile()
-            fitnet_loop(profile)
-
+            fitnet_loop(profile)   # if you have this; otherwise remove this option
         elif choice == "4":
             run_registration_interactive()
-
         elif choice == "5":
             panel("Goodbye! 👋")
             return 0
