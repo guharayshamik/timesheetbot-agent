@@ -10,6 +10,7 @@ from rich.text import Text
 from rich import box
 from rich.box import ROUNDED
 
+
 console = Console()
 
 # Default border color for our panels
@@ -124,6 +125,43 @@ def show_vibrant_help() -> None:
         "/show   /clear   /deregister   /generate   /comment   /help   /back   /email   /quit",
         style="bold magenta",
     )
+    console.print(
+        Panel(
+            cmds,
+            title="Commands",
+            title_align="left",
+            border_style="magenta",
+            box=box.ROUNDED,
+            padding=(0, 1),
+        )
+    )
+
+# ── Fitnet (Leave) help blocks ──────────────────────────────────────────────────
+def fitnet_header() -> None:
+    chip = Text.assemble(("🧭  Fitnet", "bold"), ("  LEAVE", "bold bright_green"))
+    console.print(Panel(chip, border_style="bright_green", padding=(0, 1), box=box.SQUARE))
+    console.print(Text("Type your leave in plain English, then preview or commit to Fitnet.", style="bold cyan"))
+
+def fitnet_commands() -> None:
+    # Examples
+    ex_tbl = Table.grid(padding=(0, 1))
+    ex_tbl.add_column()
+    ex_tbl.add_row(_bullet_line('"mc on 11 Sep"'))
+    ex_tbl.add_row(_bullet_line('"annual leave 1–3 Aug"'))
+    ex_tbl.add_row(_bullet_line('"/comment 11 Sep OIL"'))
+    console.print(
+        Panel(
+            ex_tbl,
+            title="Examples",
+            title_align="left",
+            border_style="cyan",
+            box=box.ROUNDED,
+            padding=(0, 1),
+        )
+    )
+
+    # Commands
+    cmds = Text("/login   /preview   /commit   /show   /clear   /help   /back   /quit", style="bold magenta")
     console.print(
         Panel(
             cmds,
