@@ -1,32 +1,13 @@
-# timesheetbot_agent/cli.py (top of file)
+# timesheetbot_agent/cli.py
 from __future__ import annotations
-from .ui import console
+
 import sys
 from typing import Optional, List
 from datetime import datetime
 
-from .napta import NaptaClient
-from .ui import banner, panel, panels, input_prompt, show_vibrant_help 
-from . import fitnet
-
-# Pretty UI helpers (safe optional imports)
-try:
-    from .ui import fitnet_header, fitnet_commands
-except Exception:
-    fitnet_header = None
-    fitnet_commands = None
-
-from .storage import (
-    load_profile,
-    save_profile,
-    load_session,
-    clear_session,
-    clear_profile,
-)
-from .registration import run_registration_interactive
-from .engine import Engine
-
+# UI
 from .ui import (
+    console,
     banner,
     menu,
     input_prompt,
@@ -36,8 +17,21 @@ from .ui import (
     show_vibrant_help,
 )
 
+# Napta (simple current-week actions)
 from .napta import NaptaClient
-from .ui import banner, panel, panels, input_prompt, console
+
+# Engine / storage / registration
+from .engine import Engine
+from .storage import (
+    load_profile,
+    save_profile,
+    load_session,
+    clear_session,
+    clear_profile,
+)
+from .registration import run_registration_interactive
+
+# Pretty blocks
 from rich.text import Text
 from rich.panel import Panel
 from rich.table import Table
@@ -77,6 +71,16 @@ def show_session_box() -> None:
     ]
     panels(lines)
 
+def _drain_stdin_nonblocking():
+    """Swallow any pending newlines so we don't print a duplicate prompt."""
+    try:
+        import sys, select
+        while select.select([sys.stdin], [], [], 0)[0]:
+            sys.stdin.readline()
+    except Exception:
+        # best effort; ignore on platforms without select
+        pass
+
 
 # ------------------------------ GovTech flow ---------------------------------
 
@@ -101,7 +105,7 @@ def govtech_loop(profile: dict) -> None:
         cmd = s.strip()
 
         # Core commands
-        if cmd in ("/quit", "/q"):
+        if cmd in ("/quit", "/q", "quit", "q", "/exit", "exit"):
             panel("👋 Bye!")
             sys.exit(0)
 
@@ -133,80 +137,111 @@ def govtech_loop(profile: dict) -> None:
         panels(out_lines)
 
 
-# ------------------------------ Napta placeholder ----------------------------
+# ------------------------------ Napta (simple) --------------------------------
+
+from rich.text import Text
+from rich.panel import Panel
+from rich.table import Table
+from rich import box
+from .ui import console, panel, input_prompt, banner
+
 def _bullet_line(s: str, style: str = "bold green") -> Text:
     return Text("• ", style="dim") + Text(s, style=style)
 
-def _show_napta_help_block() -> None:
-    chip = Text.assemble(("⚡  NAPTA chat mode", "bold"), ("  ON", "bold bright_green"))
+def _show_napta_simple_help_block() -> None:
+    """Pretty 'NAPTA Chat mode ON + examples + commands' block."""
+    # Chip header
+    chip = Text.assemble(("⚡  NAPTA Chat mode", "bold"), ("  ON", "bold bright_green"))
     console.print(Panel(chip, border_style="bright_green", padding=(0, 1), box=box.SQUARE))
+
+    # Subtitle
     console.print(Text("Describe your Napta action in plain English, e.g.:", style="bold cyan"))
 
+    # Examples
     ex_tbl = Table.grid(padding=(0, 1))
     ex_tbl.add_column()
-    ex_tbl.add_row(_bullet_line("'all day worked' — keep current grid, just save"))
-    ex_tbl.add_row(_bullet_line("'all day 1d' — (planned) fill first row Mon–Fri with 1d each, then save"))
-    ex_tbl.add_row(_bullet_line("'/save' — Save this week (draft)"))
-    ex_tbl.add_row(_bullet_line("'/submit' — Submit this week for approval"))
-    ex_tbl.add_row(_bullet_line("'/submit month' — choose All weeks / 1st / 2nd / 3rd / 4th (5th if any)"))
-    console.print(Panel(ex_tbl, title="Examples", title_align="left",
-                        border_style="cyan", box=box.ROUNDED, padding=(0, 1)))
-    cmds = Text("/save   /submit   /save month   /submit month   /back   /quit", style="bold magenta")
-    console.print(Panel(cmds, title="Commands", title_align="left",
-                        border_style="magenta", box=box.ROUNDED, padding=(0, 1)))
+    ex_tbl.add_row(_bullet_line("'save' — Save THIS week (draft)"))
+    ex_tbl.add_row(_bullet_line("'submit' — Submit THIS week for approval"))
+    ex_tbl.add_row(_bullet_line("'ss' — Save then Submit (THIS week)"))
+    console.print(
+        Panel(
+            ex_tbl,
+            title="Examples",
+            title_align="left",
+            border_style="cyan",
+            box=box.ROUNDED,
+            padding=(0, 1),
+        )
+    )
 
-def _ask_week_choice() -> str:
-    """Return 'all' or '1'..'5'."""
-    console.print(Panel("Choose weeks for the **current month**:", border_style="cyan", box=box.ROUNDED))
-    while True:
-        ans = input_prompt("napta› weeks? (all / 1 / 2 / 3 / 4 / 5)")
-        t = ans.strip().lower()
-        if t in ("all", "1", "2", "3", "4", "5"):
-            return t
-        panel("⚠️ Please type: all / 1 / 2 / 3 / 4 / 5")
+    # Commands
+    cmds = Text("save   submit   ss   back   quit", style="bold magenta")
+    console.print(
+        Panel(
+            cmds,
+            title="Commands",
+            title_align="left",
+            border_style="magenta",
+            box=box.ROUNDED,
+            padding=(0, 1),
+        )
+    )
 
 def napta_loop(profile: dict) -> None:
     banner(f"{profile.get('name')} <{profile.get('email')}>")
-    client = NaptaClient()
-    panels([f"Napta auth status: {client.status()}"])
-    _show_napta_help_block()
-    panels([
-        "This uses your browser’s SSO cookies.",
-        "If a save/submit fails, please open https://app.napta.io in your browser and login once, then retry.",
-    ])
 
-    # Optional one-time mode line (we keep the flag for future, but no cell edits yet)
-    _ = input_prompt("napta› enter 'all day worked' or 'all day 1d' (optional, Enter to skip)").strip().lower()
+    client = NaptaClient()
+    panel(f"Napta auth status: {client.status()}")
+
+    # NEW: Napta chat mode UI (chip + examples + commands)
+    _show_napta_simple_help_block()
+
+    # Small note boxes (optional but matches earlier style)
+    console.print(Panel("This uses your browser’s SSO cookies.", border_style="white", box=box.ROUNDED))
+    console.print(
+        Panel(
+            "If a save/submit fails, please open https://app.napta.io once and log in, then retry.",
+            border_style="white",
+            box=box.ROUNDED,
+        )
+    )
 
     while True:
-        cmd = input_prompt("napta› (/save, /submit, /save month, /submit month, /back, /quit)").strip().lower()
+        try:
+            _drain_stdin_nonblocking() 
+            cmd = input_prompt("napta›").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            panel("👋 Bye!")
+            return
+
         if not cmd:
             continue
-        if cmd in ("/quit", "/q"):
-            panel("👋 Bye!"); sys.exit(0)
-        if cmd == "/back":
-            panel("↩️  Back to main menu."); return
 
-        if cmd == "/save":
-            ok, msg = client.save_current_week(all_day_1d=False)
-            panel(msg); continue
+        if cmd in ("/quit", "/q", "quit", "q", "/exit", "exit"):
+            panel("👋 Bye!")
+            sys.exit(0)
 
-        if cmd == "/submit":
+        if cmd in ("back", "/back"):
+            panel("↩️  Back to main menu.")
+            return
+
+        if cmd in ("save", "/save"):
+            ok, msg = client.save_current_week()
+            panel(msg)
+            continue
+
+        if cmd in ("submit", "/submit"):
             ok, msg = client.submit_current_week()
-            panel(msg); continue
+            panel(msg)
+            continue
 
-        if cmd == "/save month":
-            wk = _ask_week_choice()  # 'all' / '1'..'5'
-            ok, msg = client.save_month_choice("all" if wk == "all" else int(wk))
-            panel(msg); continue
+        if cmd in ("ss", "/ss"):
+            ok, msg = client.save_and_submit_current_week()
+            panel(msg)
+            continue
 
-        if cmd == "/submit month":
-            wk = _ask_week_choice()
-            # NOTE: “All weeks” path is fully automatic — no extra inputs.
-            ok, msg = client.submit_month_choice("all" if wk == "all" else int(wk))
-            panel(msg); continue
 
-        panel("⚠️ Unknown command. Try: /save, /submit, /save month, /submit month, /back, /quit")
+        panel("⚠️ Unknown command. Use: save | submit | ss | back | quit")
 
 
 # ------------------------------ Fitnet flow ----------------------------------
@@ -228,6 +263,8 @@ def _run_fitnet_applies(commit: bool) -> List[str]:
     Iterate all queued leaves in the current session and call fitnet.apply_leave.
     Returns UI lines to display.
     """
+    from . import fitnet  # local import to avoid circulars if any
+
     sess = load_session()
     leaves = sess.get("leave_details", [])
     remarks = sess.get("remarks", {}) or {}
@@ -244,9 +281,8 @@ def _run_fitnet_applies(commit: bool) -> List[str]:
             lines.append(f"❌ Skipped {start_key}–{end_key}: bad date key ({e}).")
             continue
 
-        # Per-day remarks supported via start_key
         comment = remarks.get(start_key, "")
-        half_day = None  # engine doesn't capture AM/PM; extend later if needed
+        half_day = None
 
         ok, msg, shot = fitnet.apply_leave(
             start=start_dt,
@@ -254,8 +290,8 @@ def _run_fitnet_applies(commit: bool) -> List[str]:
             leave_type=leave_type,
             comment=comment,
             half_day=half_day,
-            commit=commit,                 # preview by default; commit when asked
-            screenshot_to=None,            # could capture if desired
+            commit=commit,
+            screenshot_to=None,
         )
 
         prefix = "✅" if ok else "❌"
@@ -272,22 +308,20 @@ def _run_fitnet_applies(commit: bool) -> List[str]:
 
 
 def fitnet_loop(profile: dict) -> None:
-    # Fresh parsing session for Fitnet too (so you can try a different month)
+    # Fresh parsing session
     eng = Engine(profile)
     eng.reset_session()
 
     banner(f"{profile.get('name')} <{profile.get('email')}>")
-    if fitnet_header:
-        try:
-            fitnet_header()
-            if fitnet_commands:
-                fitnet_commands()
-        except Exception:
-            pass
-    else:
+
+    # If you have the fancy Fitnet headers in ui.py, show them; else show basics
+    try:
+        from .ui import fitnet_header, fitnet_commands
+        fitnet_header(); fitnet_commands()
+    except Exception:
         panels([
             "Fitnet (Leave) — safe preview by default.",
-            "Commands: /login, /preview, /commit, /show, /clear, /help, /back, /quit",
+            "Commands: /preview, /commit, /show, /clear, /help, /back, /quit",
             "Examples:",
             "  - mc on 11 Sep",
             "  - annual leave 1–3 Aug",
@@ -309,8 +343,8 @@ def fitnet_loop(profile: dict) -> None:
 
         cmd = s.strip().lower()
 
-        # global exits
-        if cmd in ("/quit", "/q"):
+        # exits
+        if cmd in ("/quit", "/q", "quit", "q", "/exit", "exit"):
             panel("👋 Bye!")
             sys.exit(0)
         if cmd == "/back":
@@ -321,7 +355,6 @@ def fitnet_loop(profile: dict) -> None:
         if cmd == "/help":
             panels([
                 "Fitnet commands:",
-                "  /login   — open a browser to capture SSO cookies (one-time)",
                 "  /preview — prefill Fitnet (no save), for all leaves you've typed",
                 "  /commit  — save in Fitnet (careful!)",
                 "  /show    — show the queued leaves",
@@ -338,38 +371,6 @@ def fitnet_loop(profile: dict) -> None:
             clear_session()
             panel("🧹 Session cleared.")
             continue
-
-        # Fitnet login capture
-        # /login flow for non-technical users (device flow)
-        # /login (device flow — SSO, no secrets)
-        if cmd == "/login":
-            try:
-                ok, msg = client.device_login()
-                panel(msg)
-                if ok:
-                    try:
-                        me = client.whoami()
-                        panels([f"✅ User OK: {me.get('data', {}).get('id', 'unknown')}"])
-                    except Exception as e:
-                        panels([f"⚠️ Logged in but /user failed: {e}"])
-            except NaptaAuthError as e:
-                panels([f"❌ {e}", "Tip: /login set-client <PUBLIC_CLIENT_ID>"])
-            continue
-
-        # optional: set the public client id once (if not shipped via env)
-        if cmd.startswith("/login set-client"):
-            parts = cmd.split()
-            if len(parts) == 3:
-                _, _, cid = parts
-                try:
-                    client.configure_device_client(cid)
-                    panels(["✅ Saved public client id. Now run /login."])
-                except NaptaAuthError as e:
-                    panels([f"❌ {e}"])
-            else:
-                panels(["⚠️ Usage: /login set-client <PUBLIC_CLIENT_ID>"])
-            continue
-
 
         # Preview / Commit actions
         if cmd == "/preview":
@@ -407,18 +408,14 @@ def main(argv: Optional[list] = None) -> int:
             govtech_loop(profile)
         elif choice == "3":
             profile = ensure_profile()
-            fitnet_loop(profile)   # if you have this; otherwise remove this option
+            fitnet_loop(profile)
         elif choice == "4":
             run_registration_interactive()
         elif choice == "5":
             panel("Goodbye! 👋")
             return 0
-
         else:
             panel("Please pick 1–5.")
-
-    # Unreachable
-    # return 0
 
 
 if __name__ == "__main__":
