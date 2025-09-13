@@ -137,10 +137,12 @@ def _split(date_str: str) -> Tuple[int, str]:
 def _valid(day: int, month_name: str) -> bool:
     try:
         month_num = datetime.strptime(month_name, "%B").month
-        datetime(2025, month_num, day)
+        # Use current year instead of 2025:
+        datetime(datetime.now().year, month_num, day)
         return True
     except ValueError:
         return False
+
 
 def _parse_day_pairs(text: str) -> List[Tuple[int, str]]:
     pairs: List[Tuple[int, str]] = []
@@ -246,6 +248,26 @@ def _first_date_with_span(text: str) -> Optional[Tuple[int, str, Tuple[int, int]
         if d and mon:
             return d, mon, m.span()
     return None
+
+def _detect_leave_type(text: str) -> Optional[str]:
+    import re
+    specific_hit = None
+    generic_hit = None
+    for k, canon in _LEAVE_SYNONYMS.items():
+        if re.search(rf"\b{re.escape(k)}\b", text, flags=re.I):
+            if k == "leave":
+                generic_hit = canon      # remember as fallback
+                continue                 # skip for now; try to find something specific
+            # first specific match wins (ns, sick, childcare, etc.)
+            specific_hit = canon
+            break
+    if specific_hit:
+        return specific_hit
+    # If user literally typed a full allowed type, accept that too
+    for a in _ALLOWED_TYPES:
+        if re.search(rf"\b{re.escape(a)}\b", text, flags=re.I):
+            return a
+    return generic_hit
 
 # ---------- Engine ----------
 class Engine:
@@ -408,14 +430,15 @@ class Engine:
 
 
         # ---- leave type?
-        leave_type = None
-        for k, canon in _LEAVE_SYNONYMS.items():
-            if re.search(rf"\b{re.escape(k)}\b", text, flags=re.I):
-                leave_type = canon; break
-        if not leave_type:
-            for a in _ALLOWED_TYPES:
-                if re.search(rf"\b{re.escape(a)}\b", text, flags=re.I):
-                    leave_type = a; break
+        leave_type = _detect_leave_type(text)
+
+        # for k, canon in _LEAVE_SYNONYMS.items():
+        #     if re.search(rf"\b{re.escape(k)}\b", text, flags=re.I):
+        #         leave_type = canon; break
+        # if not leave_type:
+        #     for a in _ALLOWED_TYPES:
+        #         if re.search(rf"\b{re.escape(a)}\b", text, flags=re.I):
+        #             leave_type = a; break
 
         leave_details: List[Sequence] = sess.get("leave_details", [])
 
