@@ -31,3 +31,11 @@ coverage.xml
 
 # --- App data
 generated_timesheets/
+# Napta debug screenshots
+napta_*.png
+*_timeout.png
+*_failure_*.png
+*_unverified_*.png
+
+# Build metadata
+timesheetbot_agent.egg-info/
