@@ -14,9 +14,10 @@ import concurrent.futures
 
 DEFAULT_APP_URL = "https://app.napta.io/timesheet"
 
-# Absolute XPaths observed in your tenant
+# Absolute XPaths observed in your tenant (from your screenshots)
 SAVE_BTN_XPATH = '/html/body/div[1]/div[2]/div[1]/div[2]/div[2]/button'
 THIS_WEEK_BTN_XPATH = '/html/body/div[1]/div[2]/div[1]/div[2]/div[2]/div/button[2]'
+NEXT_WEEK_BTN_XPATH = '/html/body/div[1]/div[2]/div[1]/div[2]/div[2]/div/button[3]'
 
 # Cache paths
 _CACHE_DIR = Path(os.path.expanduser("~/.cache/timesheetbot"))
@@ -37,13 +38,15 @@ _ANALYTICS_HOSTS = (
 )
 
 # Timeouts
-SHORT_TIMEOUT_MS = 10_000
+SHORT_TIMEOUT_MS = 12_000
 DEFAULT_TIMEOUT_MS = 7_000
 LONG_TIMEOUT_MS = 300_000  # for headful SSO during login()
 
+# Use the same desktop UA as your working script
 UA_DESKTOP = (
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/122.0 Safari/537.36"
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/127.0.0.0 Safari/537.36"
 )
 
 
@@ -81,7 +84,7 @@ def _route_slim(route):
     return route.continue_()
 
 
-# ---------- core helpers that mirror your napta_save.py ----------
+# ---------- core helpers (robust toolbar detection) ----------
 
 def _wait_for_timesheet_ready(page, timeout_ms: int) -> Optional[str]:
     """
@@ -89,25 +92,52 @@ def _wait_for_timesheet_ready(page, timeout_ms: int) -> Optional[str]:
     Returns: "save", "submit", or None
     """
     end = time.time() + (timeout_ms / 1000.0)
+
+    # helpers: case-insensitive contains via XPath
+    def _ci_xpath_contains(label: str) -> str:
+        return (
+            "//button[contains(translate(normalize-space(.),"
+            "'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),"
+            f"'{label.lower()}')]"
+        )
+
     while time.time() < end:
+        # 1) explicit ARIA roles
         with suppress_exc():
             if page.get_by_role("button", name="Save").is_visible():
                 return "save"
         with suppress_exc():
             if page.get_by_role("button", name="Submit for approval").is_visible():
                 return "submit"
-        # fallback checks by text (in case a11y name differs)
+
+        # 2) text match (strict)
         with suppress_exc():
             if page.locator('button:has-text("Save")').is_visible():
                 return "save"
         with suppress_exc():
             if page.locator('button:has-text("Submit for approval")').is_visible():
                 return "submit"
-        # last resort: absolute xpath
+
+        # 3) case-insensitive contains (covers "Submit", "submit for approval", etc.)
+        with suppress_exc():
+            if page.locator(_ci_xpath_contains("submit for approval") + " | " + _ci_xpath_contains("submit")).first.is_visible():
+                return "submit"
+        with suppress_exc():
+            if page.locator(_ci_xpath_contains("save")).first.is_visible():
+                return "save"
+
+        # 4) absolute XPaths (your tenant)
         with suppress_exc():
             if page.locator(f"xpath={SAVE_BTN_XPATH}").is_visible():
                 return "save"
+
+        # 5) hint that toolbar loaded (This week pill visible) — keep looping
+        with suppress_exc():
+            if page.locator(f"xpath={THIS_WEEK_BTN_XPATH}").first.is_visible():
+                pass
+
         time.sleep(0.25)
+
     return None
 
 
@@ -130,7 +160,6 @@ def _click_submit(page) -> bool:
     strategies = [
         lambda: page.get_by_role("button", name="Submit for approval"),
         lambda: page.locator('button:has-text("Submit for approval")'),
-        # sometimes save/submit share same container; XPath text match:
         lambda: page.locator('//button[contains(normalize-space(.), "Submit for approval")]'),
     ]
     for make in strategies:
@@ -156,6 +185,7 @@ class NaptaClient:
       - Detects "save" vs "submit" presence
       - If "submit" is visible → already saved → don't click Save
       - Else clicks Save
+      - Adds: save_next_week() which navigates to next week via absolute XPath and saves there.
     """
 
     def __init__(self) -> None:
@@ -173,6 +203,9 @@ class NaptaClient:
 
     def save_current_week(self) -> Tuple[bool, str]:
         return self._run_in_worker(self._save_current_week_sync)
+
+    def save_next_week(self) -> Tuple[bool, str]:
+        return self._run_in_worker(self._save_next_week_sync)
 
     def submit_current_week(self) -> Tuple[bool, str]:
         return self._run_in_worker(self._submit_current_week_sync)
@@ -302,12 +335,30 @@ class NaptaClient:
     def _open_timesheet(self, page):
         page.goto(DEFAULT_APP_URL, wait_until="domcontentloaded", timeout=12_000)
         with suppress_exc():
+            page.wait_for_load_state("networkidle", timeout=20_000)
+        with suppress_exc():
             page.keyboard.press("Escape")
         # Best-effort “This week”
         with suppress_exc():
             page.get_by_role("button", name="This week").click(timeout=1_200)
         with suppress_exc():
             page.locator(f"xpath={THIS_WEEK_BTN_XPATH}").first.click(timeout=1_200)
+
+    def _goto_next_week(self, page) -> Optional[str]:
+        """
+        Click the 'next week' arrow and wait for the toolbar (Save/Submit).
+        Returns: "save" | "submit" | None
+        """
+        with suppress_exc():
+            loc = page.locator(f"xpath={NEXT_WEEK_BTN_XPATH}").first
+            loc.wait_for(state="visible", timeout=SHORT_TIMEOUT_MS)
+            with suppress_exc():
+                loc.scroll_into_view_if_needed()
+            loc.click(timeout=SHORT_TIMEOUT_MS)
+        # Give the page a brief settle, then detect toolbar
+        with suppress_exc():
+            page.wait_for_load_state("networkidle", timeout=10_000)
+        return _wait_for_timesheet_ready(page, timeout_ms=SHORT_TIMEOUT_MS * 2)
 
     # ---------- operations (run inside worker) ----------
 
@@ -329,7 +380,7 @@ class NaptaClient:
             if state is None:
                 name = f"napta_error_{ts()}.png"
                 page.screenshot(path=name, full_page=True)
-                raise NaptaAuthError("Page didn’t show Save/Submit. Auth may have expired.")
+                raise NaptaAuthError(f"Page didn’t show Save/Submit. Auth may have expired. Screenshot -> {name}")
 
             if state == "submit":
                 return True, "✅ Timesheet already saved. 'Submit for approval' is visible."
@@ -343,6 +394,49 @@ class NaptaClient:
             with suppress_exc():
                 page.wait_for_selector("text=Saved", timeout=SHORT_TIMEOUT_MS)
             return True, "✅ Saved (draft)."
+        except NaptaAuthError as e:
+            return False, f"⛔ Napta login required. {e}"
+        finally:
+            with suppress_exc():
+                if browser:
+                    browser.close()
+            p.stop()
+
+    def _save_next_week_sync(self) -> Tuple[bool, str]:
+        """
+        Navigate to NEXT week via absolute XPath and save there.
+        """
+        p = sync_playwright().start()
+        browser = None
+        try:
+            browser, ctx = self._build_context(p, headless=True)
+            page = ctx.new_page()
+            self._open_timesheet(page)
+
+            if self._on_login_page(page):
+                name = f"napta_login_required_{ts()}.png"
+                page.screenshot(path=name, full_page=True)
+                return False, f"⛔ Napta login required. Login required. Please open Napta once in Chrome. Screenshot -> {name}"
+
+            # move to next week
+            state = self._goto_next_week(page)
+            if state is None:
+                name = f"napta_next_week_error_{ts()}.png"
+                page.screenshot(path=name, full_page=True)
+                return False, f"❌ Could not detect Save/Submit after moving to next week. Screenshot -> {name}"
+
+            if state == "submit":
+                return True, "✅ Next week already saved. 'Submit for approval' is visible."
+
+            # state == "save"
+            if not _click_save(page):
+                name = f"napta_next_week_save_failure_{ts()}.png"
+                page.screenshot(path=name, full_page=True)
+                return False, f"❌ Could not click 'Save' on next week. Screenshot -> {name}"
+
+            with suppress_exc():
+                page.wait_for_selector("text=Saved", timeout=SHORT_TIMEOUT_MS)
+            return True, "✅ Saved next week (draft)."
         except NaptaAuthError as e:
             return False, f"⛔ Napta login required. {e}"
         finally:
@@ -368,7 +462,7 @@ class NaptaClient:
             if state is None:
                 name = f"napta_error_{ts()}.png"
                 page.screenshot(path=name, full_page=True)
-                raise NaptaAuthError("Page didn’t show Save/Submit. Auth may have expired.")
+                raise NaptaAuthError(f"Page didn’t show Save/Submit. Auth may have expired. Screenshot -> {name}")
 
             # If not saved yet, save first
             if state == "save":
@@ -409,7 +503,7 @@ class NaptaClient:
             page = ctx.new_page()
             page.goto(DEFAULT_APP_URL, wait_until="domcontentloaded", timeout=30_000)
 
-            # Give time for SSO/2FA and wait for Save/Submit to appear
+            # Let SSO/2FA complete; wait for Save/Submit to appear
             ready = _wait_for_timesheet_ready(page, timeout_ms=LONG_TIMEOUT_MS)
             if ready is None:
                 name = f"napta_login_timeout_{ts()}.png"

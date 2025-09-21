@@ -1,4 +1,3 @@
-# timesheetbot_agent/cli.py
 from __future__ import annotations
 
 import sys
@@ -161,6 +160,7 @@ def _show_napta_simple_help_block() -> None:
     ex_tbl = Table.grid(padding=(0, 1))
     ex_tbl.add_column()
     ex_tbl.add_row(_bullet_line("'save' — Save THIS week (draft)"))
+    ex_tbl.add_row(_bullet_line("'save next week' — Save NEXT week (draft)"))  # <-- added
     ex_tbl.add_row(_bullet_line("'submit' — Submit THIS week for approval"))
     ex_tbl.add_row(_bullet_line("'ss' — Save then Submit (THIS week)"))
     console.print(
@@ -175,7 +175,7 @@ def _show_napta_simple_help_block() -> None:
     )
 
     # Commands
-    cmds = Text("login   save   submit   ss   back   quit", style="bold magenta")
+    cmds = Text("login   save   save next week (snw)   submit   ss   back   quit", style="bold magenta")  # <-- added
     console.print(
         Panel(
             cmds,
@@ -193,10 +193,10 @@ def napta_loop(profile: dict) -> None:
     client = NaptaClient()
     panel(f"Napta auth status: {client.status()}")
 
-    # NEW: Napta chat mode UI (chip + examples + commands)
+    # Napta chat mode UI (chip + examples + commands)
     _show_napta_simple_help_block()
 
-    # Small note boxes (optional but matches earlier style)
+    # Small note boxes
     console.print(Panel("This uses your browser’s SSO cookies.", border_style="white", box=box.ROUNDED))
     console.print(
         Panel(
@@ -225,6 +225,12 @@ def napta_loop(profile: dict) -> None:
             panel("↩️  Back to main menu.")
             return
 
+        # NEW: Save NEXT week
+        if cmd in ("save next week", "/save next week", "save-next-week", "/save-next-week", "snw", "/snw"):
+            ok, msg = client.save_next_week()
+            panel(msg)
+            continue
+
         if cmd in ("save", "/save"):
             ok, msg = client.save_current_week()
             panel(msg)
@@ -245,8 +251,7 @@ def napta_loop(profile: dict) -> None:
             panel(msg)
             continue
 
-
-        panel("⚠️ Unknown command. Use: login | save | submit | ss | back | quit")
+        panel("⚠️ Unknown command. Use: login | save | save next week (snw) | submit | ss | back | quit")
 
 
 
