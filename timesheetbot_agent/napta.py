@@ -4,22 +4,27 @@ from __future__ import annotations
 import json
 import os
 import time
+from datetime import datetime
 from pathlib import Path
-from typing import Tuple, Optional, Iterable, Dict, Any
+from typing import Tuple, Optional, Iterable
 
-from playwright.sync_api import (
-    sync_playwright,
-    TimeoutError as PWTimeoutError,
-    Error as PWError,
-)
+from playwright.sync_api import sync_playwright, TimeoutError as PWTimeoutError
 import browser_cookie3
+import concurrent.futures
 
 DEFAULT_APP_URL = "https://app.napta.io/timesheet"
 
+# Absolute XPaths observed in your tenant
+SAVE_BTN_XPATH = '/html/body/div[1]/div[2]/div[1]/div[2]/div[2]/button'
+THIS_WEEK_BTN_XPATH = '/html/body/div[1]/div[2]/div[1]/div[2]/div[2]/div/button[2]'
+
+# Cache paths
 _CACHE_DIR = Path(os.path.expanduser("~/.cache/timesheetbot"))
 _CACHE_DIR.mkdir(parents=True, exist_ok=True)
 _COOKIE_CACHE = _CACHE_DIR / "napta_cookies.json"
+STATE_PATH = _CACHE_DIR / "napta_storage_state.json"  # persisted after login()
 
+# Light network slimming
 _ANALYTICS_HOSTS = (
     "googletagmanager.com",
     "google-analytics.com",
@@ -31,124 +36,229 @@ _ANALYTICS_HOSTS = (
     "hotjar.com",
 )
 
+# Timeouts
+SHORT_TIMEOUT_MS = 10_000
+DEFAULT_TIMEOUT_MS = 7_000
+LONG_TIMEOUT_MS = 300_000  # for headful SSO during login()
+
+UA_DESKTOP = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/122.0 Safari/537.36"
+)
+
+
 class NaptaAuthError(RuntimeError):
-    """Raised when SSO cookies are missing/expired."""
+    """Raised when SSO/app login is required or session is expired."""
     pass
 
 
+# ---------- tiny utility helpers ----------
+
+def ts() -> str:
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+class suppress_exc:
+    """Context manager: suppress any exception; optionally re-raise at end."""
+    def __init__(self, raise_on_fail: bool = False):
+        self.raise_on_fail = raise_on_fail
+        self._exc = None
+    def __enter__(self):
+        return self
+    def __exit__(self, exc_type, exc, tb):
+        self._exc = exc
+        return not self.raise_on_fail  # suppress if not raising
+
+
+def _route_slim(route):
+    req = route.request
+    rtype = req.resource_type
+    url = req.url
+    if rtype in ("image", "media", "font"):
+        return route.abort()
+    if any(h in url for h in _ANALYTICS_HOSTS):
+        return route.abort()
+    return route.continue_()
+
+
+# ---------- core helpers that mirror your napta_save.py ----------
+
+def _wait_for_timesheet_ready(page, timeout_ms: int) -> Optional[str]:
+    """
+    Wait until either Save or Submit button is visible.
+    Returns: "save", "submit", or None
+    """
+    end = time.time() + (timeout_ms / 1000.0)
+    while time.time() < end:
+        with suppress_exc():
+            if page.get_by_role("button", name="Save").is_visible():
+                return "save"
+        with suppress_exc():
+            if page.get_by_role("button", name="Submit for approval").is_visible():
+                return "submit"
+        # fallback checks by text (in case a11y name differs)
+        with suppress_exc():
+            if page.locator('button:has-text("Save")').is_visible():
+                return "save"
+        with suppress_exc():
+            if page.locator('button:has-text("Submit for approval")').is_visible():
+                return "submit"
+        # last resort: absolute xpath
+        with suppress_exc():
+            if page.locator(f"xpath={SAVE_BTN_XPATH}").is_visible():
+                return "save"
+        time.sleep(0.25)
+    return None
+
+
+def _click_save(page) -> bool:
+    """Click Save with fallbacks: role → has-text → XPath."""
+    with suppress_exc():
+        page.get_by_role("button", name="Save").click(timeout=SHORT_TIMEOUT_MS)
+        return True
+    with suppress_exc():
+        page.locator('button:has-text("Save")').click(timeout=SHORT_TIMEOUT_MS)
+        return True
+    with suppress_exc():
+        page.click(f"xpath={SAVE_BTN_XPATH}", timeout=SHORT_TIMEOUT_MS)
+        return True
+    return False
+
+
+def _click_submit(page) -> bool:
+    """Click 'Submit for approval' (+ confirm dialog variant)."""
+    strategies = [
+        lambda: page.get_by_role("button", name="Submit for approval"),
+        lambda: page.locator('button:has-text("Submit for approval")'),
+        # sometimes save/submit share same container; XPath text match:
+        lambda: page.locator('//button[contains(normalize-space(.), "Submit for approval")]'),
+    ]
+    for make in strategies:
+        with suppress_exc():
+            loc = make().first
+            loc.wait_for(state="visible", timeout=SHORT_TIMEOUT_MS)
+            with suppress_exc():
+                loc.scroll_into_view_if_needed()
+            loc.click(timeout=SHORT_TIMEOUT_MS)
+            # optional confirm dialog
+            with suppress_exc():
+                page.get_by_role("button", name="Submit").click(timeout=2_000)
+            return True
+    return False
+
+
+# ---------- main client ----------
+
 class NaptaClient:
     """
-    Fast Napta automation that reuses your browser's SSO cookies.
-    - Reuses a single Playwright/browser/context across commands.
-    - Blocks heavy assets.
-    - Uses DOMContentLoaded & tight timeouts for speed.
+    Playwright work is executed in a background thread (prevents SyncAPI-in-asyncio crash).
+    Logic mirrors your standalone napta_save.py:
+      - Detects "save" vs "submit" presence
+      - If "submit" is visible → already saved → don't click Save
+      - Else clicks Save
     """
 
     def __init__(self) -> None:
-        self._cookie_ok: Optional[bool] = None
-        self._p = None
-        self._browser = None
-        self._ctx = None
+        self._cookie_ok: Optional[bool] = None  # for status text
 
-    # ---------- lifecycle ----------
-
-    def _ensure_running(self):
-        """Start Playwright + browser + context if not running."""
-        if self._ctx:
-            return
-
-        self._p = sync_playwright().start()
-        # headless browser; keep minimal footprint
-        self._browser = self._p.chromium.launch(headless=True)
-        self._ctx = self._browser.new_context(
-            viewport={"width": 1440, "height": 900},
-            user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                       "(KHTML, like Gecko) Chrome/122.0 Safari/537.36",
-        )
-        self._ctx.set_default_timeout(7000)  # tight default timeouts
-
-        # Block heavy/unnecessary stuff to speed up page
-        def _route(route):
-            req = route.request
-            rtype = req.resource_type
-            url = req.url
-            if rtype in ("image", "media", "font"):
-                return route.abort()
-            if any(host in url for host in _ANALYTICS_HOSTS):
-                return route.abort()
-            return route.continue_()
-        self._ctx.route("**/*", _route)
-
-        # Load cookies (cache first, then keychain)
-        try:
-            if not self._load_cookies_from_cache():
-                self._load_cookies_from_keychain_and_cache()
-            self._cookie_ok = True
-        except NaptaAuthError:
-            self._cookie_ok = False
-            self.close()
-            raise
-
-    def close(self):
-        try:
-            if self._browser:
-                self._browser.close()
-        finally:
-            try:
-                if self._p:
-                    self._p.stop()
-            finally:
-                self._p = self._browser = self._ctx = None
-
-    # ---------- cookies ----------
+    # ---------- public API (threaded wrappers) ----------
 
     def status(self) -> str:
+        if STATE_PATH.exists():
+            return "Auth: will use saved session (storage state or browser SSO cookies)."
         if self._cookie_ok is None:
-            return "Auth: will use your browser’s SSO cookies (not checked yet)."
-        return "Auth: OK (browser SSO cookies)." if self._cookie_ok else \
-               "Auth: missing/expired cookies. Please login to Napta once in your browser."
+            return "Auth: will use saved session (storage state or browser SSO cookies)."
+        return "Auth: OK (session present)." if self._cookie_ok else \
+               "Auth: missing/expired cookies. Please login to Napta once in your browser or run `login`."
 
-    def _load_cookies_for_playwright(self, cookies: Iterable[dict]) -> None:
-        batch: list[dict] = []
-        for ck in cookies:
-            batch.append(ck)
-            if len(batch) >= 100:
-                self._ctx.add_cookies(batch)
-                batch = []
-        if batch:
-            self._ctx.add_cookies(batch)
+    def save_current_week(self) -> Tuple[bool, str]:
+        return self._run_in_worker(self._save_current_week_sync)
 
-    def _load_cookies_from_cache(self) -> bool:
+    def submit_current_week(self) -> Tuple[bool, str]:
+        return self._run_in_worker(self._submit_current_week_sync)
+
+    def save_and_submit_current_week(self) -> Tuple[bool, str]:
+        ok, msg1 = self.save_current_week()
+        if not ok:
+            return False, msg1
+        ok2, msg2 = self.submit_current_week()
+        if not ok2:
+            return False, f"{msg1}\n{msg2}"
+        return True, f"{msg1}\n{msg2}"
+
+    def login(self) -> Tuple[bool, str]:
+        """Headful login and capture storage_state to STATE_PATH."""
+        return self._run_in_worker(self._login_sync)
+
+    # ---------- worker-thread runner ----------
+
+    def _run_in_worker(self, fn):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            fut = pool.submit(fn)
+            return fut.result()
+
+    # ---------- building context ----------
+
+    def _build_context(self, p, *, headless: bool):
+        browser = p.chromium.launch(headless=headless, args=["--disable-dev-shm-usage"])
+        if STATE_PATH.exists():
+            ctx = browser.new_context(
+                storage_state=str(STATE_PATH),
+                user_agent=UA_DESKTOP,
+                viewport={"width": 1400, "height": 900},
+            )
+            self._cookie_ok = True
+        else:
+            ctx = browser.new_context(
+                user_agent=UA_DESKTOP,
+                viewport={"width": 1400, "height": 900},
+            )
+            ctx.set_default_timeout(DEFAULT_TIMEOUT_MS)
+            ctx.route("**/*", _route_slim)
+            if not self._load_cookies_from_cache(ctx):
+                self._load_cookies_from_keychain_and_cache(ctx)
+            self._cookie_ok = True
+
+        with suppress_exc():
+            ctx.route("**/*", _route_slim)
+        ctx.set_default_timeout(DEFAULT_TIMEOUT_MS)
+        return browser, ctx
+
+    # ---------- cookie helpers ----------
+
+    def _load_cookies_from_cache(self, ctx) -> bool:
         if not _COOKIE_CACHE.exists():
             return False
         try:
             data = json.loads(_COOKIE_CACHE.read_text())
         except Exception:
             return False
-
         now = time.time()
-        cookies = []
+        keep: list[dict] = []
         for c in data:
             exp = c.get("expires", None)
             if exp in (None, 0) or exp > now:
-                cookies.append(c)
-        if not cookies:
+                keep.append(c)
+        if not keep:
             return False
-
-        self._load_cookies_for_playwright(cookies)
+        batch: list[dict] = []
+        for ck in keep:
+            batch.append(ck)
+            if len(batch) >= 100:
+                ctx.add_cookies(batch)
+                batch = []
+        if batch:
+            ctx.add_cookies(batch)
         return True
 
-    def _load_cookies_from_keychain_and_cache(self) -> None:
-        # Pull once from Chrome keychain, then save to local cache
+    def _load_cookies_from_keychain_and_cache(self, ctx) -> None:
         cj = browser_cookie3.chrome(domain_name=".napta.io")
         cookies = []
         now = time.time()
-
         for c in cj:
             if "napta.io" not in c.domain:
                 continue
             exp = getattr(c, "expires", None)
-            # keep if no expiry or future expiry
             if exp not in (None, 0) and exp < now:
                 continue
             cookies.append({
@@ -160,153 +270,165 @@ class NaptaClient:
                 "httpOnly": bool(getattr(getattr(c, "_rest", {}), "get", lambda *_: False)("httponly")),
                 **({"expires": int(exp)} if exp not in (None, 0) else {}),
             })
-
         if not cookies:
-            raise NaptaAuthError(
-                "No Napta cookies found. Please open https://app.napta.io in your browser, "
-                "login once with SSO, then retry."
-            )
+            raise NaptaAuthError("No Napta cookies found. Open https://app.napta.io in Chrome and sign in.")
 
-        self._load_cookies_for_playwright(cookies)
+        batch: list[dict] = []
+        for ck in cookies:
+            batch.append(ck)
+            if len(batch) >= 100:
+                ctx.add_cookies(batch)
+                batch = []
+        if batch:
+            ctx.add_cookies(batch)
 
-        # cache for later runs (avoids Keychain prompts)
-        try:
+        with suppress_exc():
             _COOKIE_CACHE.write_text(json.dumps(cookies, indent=2))
-        except Exception:
-            pass
 
     # ---------- page helpers ----------
 
-    def _open_timesheet(self, page):
-        # domcontentloaded is enough; we'll wait for specific UI after.
-        page.goto(DEFAULT_APP_URL, wait_until="domcontentloaded", timeout=12000)
-
-        # If a stray overlay/dialog is present, try to escape quickly
-        try:
-            page.keyboard.press("Escape")
-        except Exception:
-            pass
-
-        # Click “This week” if the pill exists (keeps us predictable)
-        try:
-            page.get_by_role("button", name="This week").click(timeout=1200)
-        except Exception:
-            pass
-
-    def _robust_click_button(self, page, label: str) -> None:
-        # Fast strategy list; short waits for each
-        strategies = [
-            lambda: page.get_by_role("button", name=label),
-            lambda: page.locator(f"button:has-text('{label}')"),
-            lambda: page.locator(f"xpath=//button[normalize-space()='{label}']"),
-            lambda: page.locator(f"xpath=//*[normalize-space(text())='{label}']/ancestor::button[1]"),
-        ]
-        for make in strategies:
-            try:
-                loc = make().first
-                loc.wait_for(state="visible", timeout=1500)
-                try:
-                    loc.scroll_into_view_if_needed(timeout=400)
-                except Exception:
-                    pass
-                loc.click(timeout=1500)
-                return
-            except Exception:
-                continue
-
-        # final JS try
-        clicked = page.evaluate(
-            """(txt) => {
-               const ok = el => el && el.offsetParent !== null;
-               const nodes = Array.from(document.querySelectorAll('button,[role="button"]'));
-               const el = nodes.find(n => ok(n) && (n.textContent||'').trim() === txt);
-               if (el) { el.click(); return true; }
-               return false;
-            }""",
-            label,
-        )
-        if not clicked:
-            raise PWTimeoutError(f"Could not find a clickable '{label}' button")
-
-    def _saw_badge(self, page, text: str, tries: int = 10, sleep_s: float = 0.15) -> bool:
-        for _ in range(tries):
-            try:
-                loc = page.locator(f"text={text}").first
-                if loc.count() and loc.is_visible():
-                    return True
-            except Exception:
-                pass
-            time.sleep(sleep_s)
+    def _on_login_page(self, page) -> bool:
+        with suppress_exc():
+            if page.locator('input[type="email"]').count():
+                return True
+        with suppress_exc():
+            if page.get_by_role("button", name="Continue with Google").count():
+                return True
+        with suppress_exc():
+            if page.locator("text=Welcome").count() and page.locator("text=Log in to continue").count():
+                return True
         return False
 
-    # ---------- public API (fast paths) ----------
+    def _open_timesheet(self, page):
+        page.goto(DEFAULT_APP_URL, wait_until="domcontentloaded", timeout=12_000)
+        with suppress_exc():
+            page.keyboard.press("Escape")
+        # Best-effort “This week”
+        with suppress_exc():
+            page.get_by_role("button", name="This week").click(timeout=1_200)
+        with suppress_exc():
+            page.locator(f"xpath={THIS_WEEK_BTN_XPATH}").first.click(timeout=1_200)
 
-    def save_current_week(self) -> Tuple[bool, str]:
-        try:
-            self._ensure_running()
-        except NaptaAuthError as e:
-            return False, f"❌ {e}"
+    # ---------- operations (run inside worker) ----------
 
-        page = self._ctx.new_page()
+    def _save_current_week_sync(self) -> Tuple[bool, str]:
+        p = sync_playwright().start()
+        browser = None
         try:
+            browser, ctx = self._build_context(p, headless=True)
+            page = ctx.new_page()
             self._open_timesheet(page)
 
-            # If already submitted, don't try to save
-            if self._saw_badge(page, "Pending approval") or self._saw_badge(page, "Approval pending"):
-                return True, "ℹ️ Skipped Save: week already submitted (Approval pending)."
+            # If bounced to login, fail with clear message
+            if self._on_login_page(page):
+                name = f"napta_login_required_{ts()}.png"
+                page.screenshot(path=name, full_page=True)
+                return False, f"⛔ Napta login required. Login required. Please open Napta once in Chrome. Screenshot -> {name}"
 
-            # Quick save
-            try:
-                self._robust_click_button(page, "Save")
-            except Exception as e:
-                return False, f"❌ Could not click 'Save' ({e}). Maybe already saved."
+            state = _wait_for_timesheet_ready(page, timeout_ms=SHORT_TIMEOUT_MS * 3)
+            if state is None:
+                name = f"napta_error_{ts()}.png"
+                page.screenshot(path=name, full_page=True)
+                raise NaptaAuthError("Page didn’t show Save/Submit. Auth may have expired.")
 
-            badge = self._saw_badge(page, "Saved")
-            return True, "✅ Saved (draft)." if badge else "✅ Save clicked."
-        finally:
-            try:
-                page.close()
-            except Exception:
-                pass
+            if state == "submit":
+                return True, "✅ Timesheet already saved. 'Submit for approval' is visible."
 
-    def submit_current_week(self) -> Tuple[bool, str]:
-        try:
-            self._ensure_running()
+            # state == "save"
+            if not _click_save(page):
+                name = f"napta_save_failure_{ts()}.png"
+                page.screenshot(path=name, full_page=True)
+                return False, f"❌ Could not click 'Save'. Screenshot -> {name}"
+
+            with suppress_exc():
+                page.wait_for_selector("text=Saved", timeout=SHORT_TIMEOUT_MS)
+            return True, "✅ Saved (draft)."
         except NaptaAuthError as e:
-            return False, f"❌ {e}"
+            return False, f"⛔ Napta login required. {e}"
+        finally:
+            with suppress_exc():
+                if browser:
+                    browser.close()
+            p.stop()
 
-        page = self._ctx.new_page()
+    def _submit_current_week_sync(self) -> Tuple[bool, str]:
+        p = sync_playwright().start()
+        browser = None
         try:
+            browser, ctx = self._build_context(p, headless=True)
+            page = ctx.new_page()
             self._open_timesheet(page)
 
-            try:
-                self._robust_click_button(page, "Submit for approval")
-                # Some builds show a confirm "Submit" dialog
-                try:
-                    self._robust_click_button(page, "Submit")
-                except Exception:
-                    pass
-            except Exception as e:
-                return False, f"❌ Could not click 'Submit for approval' ({e})."
+            if self._on_login_page(page):
+                name = f"napta_login_required_{ts()}.png"
+                page.screenshot(path=name, full_page=True)
+                return False, f"⛔ Napta login required. Login required. Please open Napta once in Chrome. Screenshot -> {name}"
 
-            badge = self._saw_badge(page, "Pending approval") or self._saw_badge(page, "Approval pending")
-            return True, "✅ Submitted for approval." if badge else "✅ Submit clicked."
+            state = _wait_for_timesheet_ready(page, timeout_ms=SHORT_TIMEOUT_MS * 3)
+            if state is None:
+                name = f"napta_error_{ts()}.png"
+                page.screenshot(path=name, full_page=True)
+                raise NaptaAuthError("Page didn’t show Save/Submit. Auth may have expired.")
+
+            # If not saved yet, save first
+            if state == "save":
+                if not _click_save(page):
+                    name = f"napta_save_failure_{ts()}.png"
+                    page.screenshot(path=name, full_page=True)
+                    return False, f"❌ Could not click 'Save'. Screenshot -> {name}"
+                with suppress_exc():
+                    page.wait_for_selector("text=Saved", timeout=SHORT_TIMEOUT_MS)
+                # re-check state (optional)
+                state = _wait_for_timesheet_ready(page, timeout_ms=SHORT_TIMEOUT_MS)
+
+            # Now submit
+            if not _click_submit(page):
+                name = f"napta_submit_failure_{ts()}.png"
+                page.screenshot(path=name, full_page=True)
+                return False, f"❌ Could not click 'Submit for approval'. Screenshot -> {name}"
+
+            # Light verify
+            with suppress_exc():
+                if page.locator("text=Pending approval").count() or page.locator("text=Approval pending").count():
+                    return True, "✅ Submitted for approval."
+            return True, "✅ Submit clicked."
+        except NaptaAuthError as e:
+            return False, f"⛔ Napta login required. {e}"
         finally:
-            try:
-                page.close()
-            except Exception:
-                pass
+            with suppress_exc():
+                if browser:
+                    browser.close()
+            p.stop()
 
-    def save_and_submit_current_week(self) -> Tuple[bool, str]:
-        ok, msg1 = self.save_current_week()
-        if not ok:
-            return False, msg1
-        ok2, msg2 = self.submit_current_week()
-        if not ok2:
-            return False, f"{msg1}\n{msg2}"
-        return True, f"{msg1}\n{msg2}"
+    def _login_sync(self) -> Tuple[bool, str]:
+        """Headful login and capture storage_state to STATE_PATH."""
+        p = sync_playwright().start()
+        browser = None
+        try:
+            browser, ctx = self._build_context(p, headless=False)
+            page = ctx.new_page()
+            page.goto(DEFAULT_APP_URL, wait_until="domcontentloaded", timeout=30_000)
 
-    # Kept for CLI compatibility
+            # Give time for SSO/2FA and wait for Save/Submit to appear
+            ready = _wait_for_timesheet_ready(page, timeout_ms=LONG_TIMEOUT_MS)
+            if ready is None:
+                name = f"napta_login_timeout_{ts()}.png"
+                page.screenshot(path=name, full_page=True)
+                return False, f"Login window timed out. Screenshot -> {name}"
+
+            # Persist session (cookies + localStorage)
+            ctx.storage_state(path=str(STATE_PATH))
+            return True, "✅ Login captured. You can now run: save / submit."
+        except Exception as e:
+            return False, f"Login failed: {e!s}"
+        finally:
+            with suppress_exc():
+                if browser:
+                    browser.close()
+            p.stop()
+
+    # ---------- CLI compatibility ----------
+
     def preview_week(self, iso_week: str, *, leave_details=None):
         return True, "(preview) Using current week; nothing to preview.", None
 

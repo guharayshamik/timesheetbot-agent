@@ -175,7 +175,7 @@ def _show_napta_simple_help_block() -> None:
     )
 
     # Commands
-    cmds = Text("save   submit   ss   back   quit", style="bold magenta")
+    cmds = Text("login   save   submit   ss   back   quit", style="bold magenta")
     console.print(
         Panel(
             cmds,
@@ -240,8 +240,14 @@ def napta_loop(profile: dict) -> None:
             panel(msg)
             continue
 
+        if cmd in ("login", "/login"):
+            ok, msg = client.login()
+            panel(msg)
+            continue
 
-        panel("⚠️ Unknown command. Use: save | submit | ss | back | quit")
+
+        panel("⚠️ Unknown command. Use: login | save | submit | ss | back | quit")
+
 
 
 # ------------------------------ Fitnet flow ----------------------------------
