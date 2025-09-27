@@ -1,3 +1,4 @@
+# timesheetbot_agent/cli.py
 from __future__ import annotations
 
 import sys
@@ -16,7 +17,7 @@ from .ui import (
     show_vibrant_help,
 )
 
-# Napta (simple current-week actions)
+# Napta
 from .napta import NaptaClient
 
 # Engine / storage / registration
@@ -70,10 +71,11 @@ def show_session_box() -> None:
     ]
     panels(lines)
 
-def _drain_stdin_nonblocking():
+
+def _drain_stdin_nonblocking() -> None:
     """Swallow any pending newlines so we don't print a duplicate prompt."""
     try:
-        import sys, select
+        import select
         while select.select([sys.stdin], [], [], 0)[0]:
             sys.stdin.readline()
     except Exception:
@@ -138,14 +140,9 @@ def govtech_loop(profile: dict) -> None:
 
 # ------------------------------ Napta (simple) --------------------------------
 
-from rich.text import Text
-from rich.panel import Panel
-from rich.table import Table
-from rich import box
-from .ui import console, panel, input_prompt, banner
-
 def _bullet_line(s: str, style: str = "bold green") -> Text:
     return Text("• ", style="dim") + Text(s, style=style)
+
 
 def _show_napta_simple_help_block() -> None:
     """Pretty 'NAPTA Chat mode ON + examples + commands' block."""
@@ -160,8 +157,9 @@ def _show_napta_simple_help_block() -> None:
     ex_tbl = Table.grid(padding=(0, 1))
     ex_tbl.add_column()
     ex_tbl.add_row(_bullet_line("'save' — Save THIS week (draft)"))
-    ex_tbl.add_row(_bullet_line("'save next week' — Save NEXT week (draft)"))  # <-- added
+    ex_tbl.add_row(_bullet_line("'save next week' — Save NEXT week (draft)"))
     ex_tbl.add_row(_bullet_line("'submit' — Submit THIS week for approval"))
+    ex_tbl.add_row(_bullet_line("'submit next week' — Submit NEXT week for approval"))
     ex_tbl.add_row(_bullet_line("'ss' — Save then Submit (THIS week)"))
     console.print(
         Panel(
@@ -175,7 +173,10 @@ def _show_napta_simple_help_block() -> None:
     )
 
     # Commands
-    cmds = Text("login   save   snw (save next week)   submit   ss (save & submit)   back   quit", style="bold magenta")
+    cmds = Text(
+        "login   save   snw (save next week)   submit   sbnw (submit next week)   ss (save & submit)   back   quit",
+        style="bold magenta",
+    )
     console.print(
         Panel(
             cmds,
@@ -186,6 +187,7 @@ def _show_napta_simple_help_block() -> None:
             padding=(0, 1),
         )
     )
+
 
 def napta_loop(profile: dict) -> None:
     banner(f"{profile.get('name')} <{profile.get('email')}>")
@@ -208,7 +210,7 @@ def napta_loop(profile: dict) -> None:
 
     while True:
         try:
-            _drain_stdin_nonblocking() 
+            _drain_stdin_nonblocking()
             cmd = input_prompt("napta›").strip().lower()
         except (EOFError, KeyboardInterrupt):
             panel("👋 Bye!")
@@ -225,34 +227,43 @@ def napta_loop(profile: dict) -> None:
             panel("↩️  Back to main menu.")
             return
 
-        # NEW: Save NEXT week
+        # Save NEXT week
         if cmd in ("save next week", "/save next week", "save-next-week", "/save-next-week", "snw", "/snw"):
             ok, msg = client.save_next_week()
             panel(msg)
             continue
 
+        # Submit NEXT week
+        if cmd in ("submit next week", "/submit next week", "submit-next-week", "/submit-next-week", "sbnw", "/sbnw"):
+            ok, msg = client.submit_next_week()
+            panel(msg)
+            continue
+
+        # Save THIS week
         if cmd in ("save", "/save"):
             ok, msg = client.save_current_week()
             panel(msg)
             continue
 
+        # Submit THIS week
         if cmd in ("submit", "/submit"):
             ok, msg = client.submit_current_week()
             panel(msg)
             continue
 
+        # Save & Submit THIS week
         if cmd in ("ss", "/ss"):
             ok, msg = client.save_and_submit_current_week()
             panel(msg)
             continue
 
+        # Login (headful, capture session)
         if cmd in ("login", "/login"):
             ok, msg = client.login()
             panel(msg)
             continue
 
-        panel("⚠️ Unknown command. Use: login | save | save next week (snw) | submit | ss | back | quit")
-
+        panel("⚠️ Unknown command. Use: login | save | save next week (snw) | submit | submit next week (sbnw) | ss | back | quit")
 
 
 # ------------------------------ Fitnet flow ----------------------------------

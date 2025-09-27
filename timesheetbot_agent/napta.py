@@ -96,24 +96,75 @@ def _route_slim(route):
 # ---------- core helpers ----------
 
 def _get_status_chip_text(page) -> str:
-    """Best-effort read of the tiny status chip near the week header.
-    Values seen: "Not created", "Draft", "Approval pending", "Submitted".
     """
-    with suppress_exc():
-        chip = page.locator('text=/^(Not created|Draft|Approval pending|Submitted)/i').first
-        if chip.count():
-            return (chip.inner_text() or "").strip()
+    Read the small status chip near the top header (avoid the legend at the bottom).
+    Tries a few header-scoped containers before falling back to a strict single-word match.
+    """
+    # Candidates likely around the week header / action buttons
+    containers = [
+        "header",                      # top header if present
+        "main >> div:near(:text('This week'), 800)",  # area close to "This week"
+        "main >> div:has(button:has-text('Submit for approval'))",
+        "main >> div:has(button:has-text('Save'))",
+        "main",                        # fallback but still exclude legend via strict match below
+    ]
+
+    # Strict single-word/status matching to avoid picking legend text
+    status_regex = r'^(Not created|Draft|Open|Approval pending|Submitted)$'
+
+    for scope in containers:
+        with suppress_exc():
+            loc = page.locator(f"{scope} >> text=/{status_regex}/i").first
+            if loc.count():
+                text = (loc.inner_text() or "").strip()
+                # Guard against long legend strings (should be exactly the status)
+                if text and len(text) <= 20:
+                    return text
     return ""
+
+
+
+def _saw_saved_toast(page) -> bool:
+    with suppress_exc():
+        page.wait_for_selector("text=/\\bSaved\\b/i", timeout=SHORT_TIMEOUT_MS)
+        return True
+    return False
+
+
+def _wait_for_save_confirmation(page, *, prev_chip: str, timeout_s: float = 12.0) -> bool:
+    """
+    Accept success if:
+      - a “Saved” toast appears, OR
+      - the chip changes away from 'Not created' to Open/Draft/Approval pending/Submitted.
+    """
+    if _saw_saved_toast(page):
+        return True
+
+    end = time.time() + timeout_s
+    prev = (prev_chip or "").strip().lower()
+    while time.time() < end:
+        now = (_get_status_chip_text(page) or "").strip().lower()
+        if now and now != "not created":
+            if prev == "not created":
+                return True
+            if prev in ("open", "draft") and now in (
+                "open", "draft", "approval pending", "submitted"
+            ):
+                return True
+            if now != prev:
+                return True
+        time.sleep(0.15)
+    return False
 
 
 def _wait_for_timesheet_ready(page, timeout_ms: int) -> Optional[str]:
     """
     Wait until a key action button is visible.
-    Returns: "create", "save", "submit", or None if neither is present (locked/submitted view).
+    Returns: "create", "save", "submit", or None if neither is present (locked/submitted view or transient).
     """
     end = time.time() + (timeout_ms / 1000.0)
     while time.time() < end:
-        # Detect Create first (fresh week)
+        # Create
         with suppress_exc():
             loc = page.get_by_role("button", name="Create timesheet")
             if loc.count() and loc.is_visible():
@@ -129,7 +180,7 @@ def _wait_for_timesheet_ready(page, timeout_ms: int) -> Optional[str]:
             if page.locator('button:has-text("Create")').is_visible():
                 return "create"
 
-        # Submit state (already saved)
+        # Submit
         with suppress_exc():
             loc = page.get_by_role("button", name="Submit for approval")
             if loc.count() and loc.is_visible():
@@ -138,7 +189,7 @@ def _wait_for_timesheet_ready(page, timeout_ms: int) -> Optional[str]:
             if page.locator('button:has-text("Submit for approval")').is_visible():
                 return "submit"
 
-        # Save state
+        # Save
         with suppress_exc():
             loc = page.get_by_role("button", name="Save")
             if loc.count() and loc.is_visible():
@@ -213,20 +264,30 @@ def _click_submit(page) -> bool:
     return False
 
 
+def _has_submit_button(page) -> bool:
+    with suppress_exc():
+        loc = page.get_by_role("button", name="Submit for approval")
+        if loc.count() and loc.is_visible():
+            return True
+    with suppress_exc():
+        if page.locator('button:has-text("Submit for approval")').is_visible():
+            return True
+    with suppress_exc():
+        if page.locator('//button[contains(normalize-space(.), "Submit for approval")]').is_visible():
+            return True
+    return False
+
+
 def _get_week_title(page) -> str:
-    """
-    Grab the "Wxx from dd-mm-yyyy to dd-mm-yyyy" chunk if present; else empty.
-    """
+    """Grab the 'Wxx from dd-mm-yyyy to dd-mm-yyyy' chunk if present; else empty."""
     try:
         loc = page.locator("text=/^W\\d{1,2}\\s+from\\s+\\d{2}-\\d{2}-\\d{4}/i").first
         if loc.count():
             return (loc.inner_text() or "").strip()
     except Exception:
         pass
-    # fallback to header container text
     try:
         header = page.locator("main, body").first.inner_text(timeout=2000)
-        # find first match
         import re
         m = re.search(r"W\d{1,2}\s+from\s+\d{2}-\d{2}-\d{4}", header or "", re.I)
         if m:
@@ -237,11 +298,8 @@ def _get_week_title(page) -> str:
 
 
 def _go_to_next_week(page) -> bool:
-    """
-    Click the right-arrow 'next week' control and wait for the week title to change.
-    """
+    """Click the right-arrow 'next week' control and wait for the week title to change."""
     before = _get_week_title(page)
-    # click with multiple robust selectors
     clicked = False
     for try_click in (
         lambda: page.locator(NEXT_WEEK_CY).first.click(timeout=SHORT_TIMEOUT_MS),
@@ -255,7 +313,6 @@ def _go_to_next_week(page) -> bool:
     if not clicked:
         return False
 
-    # wait until the title changes
     end = time.time() + 8.0
     while time.time() < end:
         after = _get_week_title(page)
@@ -270,11 +327,6 @@ def _go_to_next_week(page) -> bool:
 class NaptaClient:
     """
     Playwright work is executed in a background thread (prevents SyncAPI-in-asyncio crash).
-    Logic:
-      - Detects create/save/submit presence
-      - If 'create' is visible → create the week first
-      - If 'submit' is visible → already saved (but not submitted)
-      - If neither button is visible → treat as SUBMITTED/locked (Approval pending)
     """
 
     def __init__(self) -> None:
@@ -298,6 +350,9 @@ class NaptaClient:
 
     def submit_current_week(self) -> Tuple[bool, str]:
         return self._run_in_worker(self._submit_current_week_sync)
+
+    def submit_next_week(self) -> Tuple[bool, str]:
+        return self._run_in_worker(self._submit_next_week_sync)
 
     def save_and_submit_current_week(self) -> Tuple[bool, str]:
         # Single-session fast path
@@ -436,12 +491,10 @@ class NaptaClient:
             page = ctx.new_page()
             self._open_timesheet(page)
 
-            # Early chip exit
-            chip = _get_status_chip_text(page).lower()
+            chip = (_get_status_chip_text(page) or "").strip().lower()
             if chip.startswith(("approval pending", "submitted")):
                 return True, "ℹ️ Timesheet already submitted for this week (Approval pending)."
 
-            # If bounced to login, fail with clear message
             if self._on_login_page(page):
                 name = f"napta_login_required_{ts()}.png"
                 page.screenshot(path=name, full_page=True)
@@ -449,10 +502,8 @@ class NaptaClient:
 
             state = _wait_for_timesheet_ready(page, timeout_ms=SHORT_TIMEOUT_MS)
             if state is None:
-                # Neither button present => lock/submitted view.
                 return True, "ℹ️ Timesheet already submitted for this week (Approval pending)."
 
-            # Handle 'create' first
             if state == "create":
                 if not _click_create(page):
                     name = f"napta_create_failure_{ts()}.png"
@@ -462,21 +513,17 @@ class NaptaClient:
                 if state is None:
                     name = f"napta_create_post_state_{ts()}.png"
                     page.screenshot(path=name, full_page=True)
-                    return False, f"❌ After 'Create', no Save/Submit visible. Screenshot -> {name}"
+                    return False, "❌ After 'Create', no Save/Submit visible."
 
             if state == "submit":
                 return True, "✅ Timesheet already saved. 'Submit for approval' is visible."
 
-            # state == "save"
             if not _click_save(page):
                 name = f"napta_save_failure_{ts()}.png"
                 page.screenshot(path=name, full_page=True)
                 return False, f"❌ Could not click 'Save'. Screenshot -> {name}"
 
-            # Verify toast (best-effort)
-            with suppress_exc():
-                page.wait_for_selector("text=Saved", timeout=SHORT_TIMEOUT_MS)
-
+            _saw_saved_toast(page)
             return True, "✅ Saved (draft)."
         except NaptaAuthError as e:
             return False, f"⛔ Napta login required. {e}"
@@ -494,24 +541,34 @@ class NaptaClient:
             page = ctx.new_page()
             self._open_timesheet(page)
 
-            # Early chip exit (after nav we'll re-check state anyway)
-            chip = _get_status_chip_text(page).lower()
-            if chip.startswith(("approval pending", "submitted")):
-                return True, "ℹ️ Next week already submitted (Approval pending)."  # conservative
-
             if self._on_login_page(page):
                 name = f"napta_login_required_{ts()}.png"
                 page.screenshot(path=name, full_page=True)
                 return False, f"⛔ Napta login required. Login required. Please open Napta once in Chrome. Screenshot -> {name}"
 
+            before = _get_week_title(page)
             if not _go_to_next_week(page):
                 name = f"napta_error_{ts()}.png"
                 page.screenshot(path=name, full_page=True)
                 return False, f"❌ Could not navigate to next week. Screenshot -> {name}"
+            after = _get_week_title(page)
+            if not after or after == before:
+                name = f"napta_nav_verify_{ts()}.png"
+                page.screenshot(path=name, full_page=True)
+                return False, f"❌ Navigation didn't land on next week. Screenshot -> {name}"
 
+            chip_before = (_get_status_chip_text(page) or "").strip().lower()
             state = _wait_for_timesheet_ready(page, timeout_ms=SHORT_TIMEOUT_MS)
+            if state is None and _has_submit_button(page):
+                # Submit is visible ⇒ it's already saved/open
+                return True, "✅ Next week saved. Do you want to 'Submit for approval'? Type sbnw"
             if state is None:
-                return True, "ℹ️ Next week already submitted (Approval pending)."
+                # Truly neither visible → likely submitted/locked
+                chip = (_get_status_chip_text(page) or "").strip().lower()
+                if chip.startswith(("approval pending", "submitted")):
+                    return True, "ℹ️ Next week already submitted (Approval pending)."
+                # transient: treat as already saved
+                return True, "✅ Next week already saved. 'Submit for approval' may be visible."
 
             if state == "create":
                 if not _click_create(page):
@@ -519,23 +576,24 @@ class NaptaClient:
                     page.screenshot(path=name, full_page=True)
                     return False, f"❌ Could not click 'Create timesheet' on next week. Screenshot -> {name}"
                 state = _wait_for_timesheet_ready(page, timeout_ms=SHORT_TIMEOUT_MS)
-                if state is None:
-                    name = f"napta_create_post_state_{ts()}.png"
-                    page.screenshot(path=name, full_page=True)
-                    return False, f"❌ After 'Create' (next week), no Save/Submit visible. Screenshot -> {name}"
 
             if state == "submit":
-                return True, "✅ Next week already saved. 'Submit for approval' is visible."
+                return True, "✅ Next week saved. Do you want to 'Submit for approval'? Type sbnw"
 
-            # state == "save"
-            if not _click_save(page):
-                name = f"napta_save_failure_{ts()}.png"
-                page.screenshot(path=name, full_page=True)
-                return False, f"❌ Could not click 'Save' on next week. Screenshot -> {name}"
+            if state == "save":
+                if not _click_save(page):
+                    name = f"napta_save_failure_{ts()}.png"
+                    page.screenshot(path=name, full_page=True)
+                    return False, f"❌ Could not click 'Save' on next week. Screenshot -> {name}"
 
-            with suppress_exc():
-                page.wait_for_selector("text=Saved", timeout=SHORT_TIMEOUT_MS)
-            return True, "✅ Saved next week (draft)."
+                if not _wait_for_save_confirmation(page, prev_chip=chip_before, timeout_s=12):
+                    name = f"napta_save_verify_fail_{ts()}.png"
+                    page.screenshot(path=name, full_page=True)
+                    return False, f"❌ Save didn’t stick for next week (chip stayed “{chip_before or 'unknown'}”). Screenshot -> {name}"
+
+                return True, "✅ Saved next week (draft)."
+
+            return False, "❌ Unexpected state while saving next week."
         except NaptaAuthError as e:
             return False, f"⛔ Napta login required. {e}"
         finally:
@@ -552,8 +610,7 @@ class NaptaClient:
             page = ctx.new_page()
             self._open_timesheet(page)
 
-            # Early chip exit
-            chip = _get_status_chip_text(page).lower()
+            chip = (_get_status_chip_text(page) or "").strip().lower()
             if chip.startswith(("approval pending", "submitted")):
                 return True, "ℹ️ Timesheet already submitted for this week (Approval pending)."
 
@@ -563,10 +620,11 @@ class NaptaClient:
                 return False, f"⛔ Napta login required. Login required. Please open Napta once in Chrome. Screenshot -> {name}"
 
             state = _wait_for_timesheet_ready(page, timeout_ms=SHORT_TIMEOUT_MS)
-            if state is None:
+            if state is None and _has_submit_button(page):
+                state = "submit"
+            elif state is None:
                 return True, "ℹ️ Timesheet already submitted for this week (Approval pending)."
 
-            # If not saved yet, save first (handle create if needed)
             if state in ("create", "save"):
                 if state == "create":
                     if not _click_create(page):
@@ -579,17 +637,14 @@ class NaptaClient:
                         name = f"napta_save_failure_{ts()}.png"
                         page.screenshot(path=name, full_page=True)
                         return False, f"❌ Could not click 'Save'. Screenshot -> {name}"
-                    with suppress_exc():
-                        page.wait_for_selector("text=Saved", timeout=SHORT_TIMEOUT_MS)
+                    _saw_saved_toast(page)
                     state = _wait_for_timesheet_ready(page, timeout_ms=SHORT_TIMEOUT_MS)
 
-            # Now submit
             if not _click_submit(page):
                 name = f"napta_submit_failure_{ts()}.png"
                 page.screenshot(path=name, full_page=True)
                 return False, f"❌ Could not click 'Submit for approval'. Screenshot -> {name}"
 
-            # Light verify
             with suppress_exc():
                 if page.locator("text=Approval pending").count():
                     return True, "✅ Submitted for approval."
@@ -602,6 +657,92 @@ class NaptaClient:
                     browser.close()
             p.stop()
 
+    def _submit_next_week_sync(self) -> Tuple[bool, str]:
+        """Navigate to next week, prefer clicking 'Submit for approval' if present, else save-then-submit."""
+        p = sync_playwright().start()
+        browser = None
+        try:
+            browser, ctx = self._build_context(p, headless=True)
+            page = ctx.new_page()
+            self._open_timesheet(page)
+
+            if self._on_login_page(page):
+                name = f"napta_login_required_{ts()}.png"
+                page.screenshot(path=name, full_page=True)
+                return False, f"⛔ Napta login required. Login required. Please open Napta once in Chrome. Screenshot -> {name}"
+
+            before = _get_week_title(page)
+            if not _go_to_next_week(page):
+                name = f"napta_error_{ts()}.png"
+                page.screenshot(path=name, full_page=True)
+                return False, f"❌ Could not navigate to next week. Screenshot -> {name}"
+            after = _get_week_title(page)
+            if not after or after == before:
+                name = f"napta_nav_verify_{ts()}.png"
+                page.screenshot(path=name, full_page=True)
+                return False, f"❌ Navigation didn't land on next week. Screenshot -> {name}"
+
+            # 1) If the submit button is visible, do it immediately.
+            if _has_submit_button(page):
+                if not _click_submit(page):
+                    name = f"napta_submit_failure_{ts()}.png"
+                    page.screenshot(path=name, full_page=True)
+                    return False, f"❌ Could not click 'Submit for approval' on next week. Screenshot -> {name}"
+                with suppress_exc():
+                    if page.locator("text=Approval pending").count():
+                        return True, "✅ Submitted next week for approval."
+                return True, "✅ Submit clicked (next week)."
+
+            # 2) Otherwise, try to get into a state where submit appears: Create → Save
+            state = _wait_for_timesheet_ready(page, timeout_ms=SHORT_TIMEOUT_MS)
+
+            if state == "create":
+                if not _click_create(page):
+                    name = f"napta_create_failure_{ts()}.png"
+                    page.screenshot(path=name, full_page=True)
+                    return False, f"❌ Could not click 'Create timesheet' on next week. Screenshot -> {name}"
+                state = _wait_for_timesheet_ready(page, timeout_ms=SHORT_TIMEOUT_MS)
+
+            if state == "save":
+                prev_chip = (_get_status_chip_text(page) or "").strip().lower()
+                if not _click_save(page):
+                    name = f"napta_save_failure_{ts()}.png"
+                    page.screenshot(path=name, full_page=True)
+                    return False, f"❌ Could not click 'Save' on next week. Screenshot -> {name}"
+                if not _wait_for_save_confirmation(page, prev_chip=prev_chip, timeout_s=12):
+                    name = f"napta_save_verify_fail_{ts()}.png"
+                    page.screenshot(path=name, full_page=True)
+                    return False, f"❌ Save didn’t stick for next week (chip stayed “{prev_chip or 'unknown'}”). Screenshot -> {name}"
+
+            # 3) After saving, the submit button should be there. If not, check chip (fallback).
+            if not _has_submit_button(page):
+                chip = (_get_status_chip_text(page) or "").strip().lower()
+                if chip.startswith(("approval pending", "submitted")):
+                    return True, "ℹ️ Next week already submitted (Approval pending)."
+                name = f"napta_submit_absent_{ts()}.png"
+                page.screenshot(path=name, full_page=True)
+                return False, "❌ Submit button not visible after saving next week. Screenshot -> " + name
+
+            # 4) Click submit now.
+            if not _click_submit(page):
+                name = f"napta_submit_failure_{ts()}.png"
+                page.screenshot(path=name, full_page=True)
+                return False, f"❌ Could not click 'Submit for approval' on next week. Screenshot -> {name}"
+
+            with suppress_exc():
+                if page.locator("text=Approval pending").count():
+                    return True, "✅ Submitted next week for approval."
+            return True, "✅ Submit clicked (next week)."
+
+        except NaptaAuthError as e:
+            return False, f"⛔ Napta login required. {e}"
+        finally:
+            with suppress_exc():
+                if browser:
+                    browser.close()
+            p.stop()
+
+
     def _save_and_submit_current_week_sync(self) -> Tuple[bool, str]:
         """Single-session save+submit for speed."""
         p = sync_playwright().start()
@@ -611,8 +752,7 @@ class NaptaClient:
             page = ctx.new_page()
             self._open_timesheet(page)
 
-            # FAST pre-check
-            chip = _get_status_chip_text(page).lower()
+            chip = (_get_status_chip_text(page) or "").strip().lower()
             if chip.startswith(("approval pending", "submitted")):
                 return True, "ℹ️ Timesheet already submitted for this week (Approval pending)."
 
@@ -622,7 +762,9 @@ class NaptaClient:
                 return False, f"⛔ Napta login required. Login required. Please open Napta once in Chrome. Screenshot -> {name}"
 
             state = _wait_for_timesheet_ready(page, timeout_ms=SHORT_TIMEOUT_MS)
-            if state is None:
+            if state is None and _has_submit_button(page):
+                state = "submit"
+            elif state is None:
                 return True, "ℹ️ Timesheet already submitted for this week (Approval pending)."
 
             if state == "create":
@@ -637,12 +779,8 @@ class NaptaClient:
                     name = f"napta_save_failure_{ts()}.png"
                     page.screenshot(path=name, full_page=True)
                     return False, f"❌ Could not click 'Save'. Screenshot -> {name}"
-                with suppress_exc():
-                    page.wait_for_selector("text=Saved", timeout=SHORT_TIMEOUT_MS)
+                _saw_saved_toast(page)
                 state = _wait_for_timesheet_ready(page, timeout_ms=SHORT_TIMEOUT_MS)
-
-            if state is None:
-                return True, "ℹ️ Timesheet already submitted for this week (Approval pending)."
 
             if not _click_submit(page):
                 name = f"napta_submit_failure_{ts()}.png"
@@ -670,10 +808,8 @@ class NaptaClient:
             page = ctx.new_page()
             page.goto(DEFAULT_APP_URL, wait_until="domcontentloaded", timeout=30_000)
 
-            # Give time for SSO/2FA and wait for action buttons
             ready = _wait_for_timesheet_ready(page, timeout_ms=LONG_TIMEOUT_MS)
             if ready is None and not self._on_login_page(page):
-                # If logged in but on a submitted week, still OK — persist state.
                 ctx.storage_state(path=str(STATE_PATH))
                 return True, "✅ Login captured. You can now run: save / submit."
             if ready is None:
@@ -681,7 +817,6 @@ class NaptaClient:
                 page.screenshot(path=name, full_page=True)
                 return False, f"Login window timed out. Screenshot -> {name}"
 
-            # Persist session (cookies + localStorage)
             ctx.storage_state(path=str(STATE_PATH))
             return True, "✅ Login captured. You can now run: save / submit."
         except Exception as e:
