@@ -175,7 +175,7 @@ def _show_napta_simple_help_block() -> None:
     )
 
     # Commands
-    cmds = Text("login   save   save next week (snw)   submit   ss   back   quit", style="bold magenta")  # <-- added
+    cmds = Text("login   save   snw (save next week)   submit   ss (save & submit)   back   quit", style="bold magenta")
     console.print(
         Panel(
             cmds,
