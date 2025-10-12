@@ -31,6 +31,14 @@ _CACHE_DIR.mkdir(parents=True, exist_ok=True)
 _COOKIE_CACHE = _CACHE_DIR / "napta_cookies.json"
 STATE_PATH = _CACHE_DIR / "napta_storage_state.json"  # persisted after login()
 
+# Screenshot dir (kept out of repo)
+_SCREENSHOT_DIR = _CACHE_DIR / "shots"
+_SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+
+def _shot(name: str) -> str:
+    return str(_SCREENSHOT_DIR / name)
+
+
 # Network slimming (speeds up page)
 _ANALYTICS_HOSTS = (
     "googletagmanager.com", "google-analytics.com", "segment.io", "sentry.io",
@@ -503,7 +511,7 @@ class NaptaClient:
                 return True, "ℹ️ Timesheet already submitted for this week (Approval pending)."
 
             if self._on_login_page(page):
-                name = f"napta_login_required_{ts()}.png"; page.screenshot(path=name, full_page=True)
+                name = f"napta_login_required_{ts()}.png"; page.screenshot(path=_shot(name), full_page=True)
                 return False, f"⛔ Napta login required. Please open Napta once in Chrome. Screenshot -> {name}"
 
             state = _wait_for_timesheet_ready(page, timeout_ms=SHORT_TIMEOUT_MS)
@@ -512,18 +520,18 @@ class NaptaClient:
 
             if state == "create":
                 if not _click_create(page):
-                    name = f"napta_create_failure_{ts()}.png"; page.screenshot(path=name, full_page=True)
+                    name = f"napta_create_failure_{ts()}.png"; page.screenshot(path=_shot(name), full_page=True)
                     return False, f"❌ Could not click 'Create timesheet'. Screenshot -> {name}"
                 state = _wait_for_timesheet_ready(page, timeout_ms=SHORT_TIMEOUT_MS)
                 if state is None:
-                    name = f"napta_create_post_state_{ts()}.png"; page.screenshot(path=name, full_page=True)
+                    name = f"napta_create_post_state_{ts()}.png"; page.screenshot(path=_shot(name), full_page=True)
                     return False, "❌ After 'Create', no Save/Submit visible."
 
             if state == "submit":
                 return True, "✅ Timesheet already saved. 'Submit for approval' is visible."
 
             if not _click_save(page):
-                name = f"napta_save_failure_{ts()}.png"; page.screenshot(path=name, full_page=True)
+                name = f"napta_save_failure_{ts()}.png"; page.screenshot(path=_shot(name), full_page=True)
                 return False, f"❌ Could not click 'Save'. Screenshot -> {name}"
 
             _saw_saved_toast(page)
@@ -542,16 +550,16 @@ class NaptaClient:
             page = ctx.new_page(); self._open_timesheet(page)
 
             if self._on_login_page(page):
-                name = f"napta_login_required_{ts()}.png"; page.screenshot(path=name, full_page=True)
+                name = f"napta_login_required_{ts()}.png"; page.screenshot(path=_shot(name), full_page=True)
                 return False, f"⛔ Napta login required. Please open Napta once in Chrome. Screenshot -> {name}"
 
             before = _get_week_title(page)
             if not _go_to_next_week(page):
-                name = f"napta_error_{ts()}.png"; page.screenshot(path=name, full_page=True)
+                name = f"napta_error_{ts()}.png"; page.screenshot(path=_shot(name), full_page=True)
                 return False, f"❌ Could not navigate to next week. Screenshot -> {name}"
             after = _get_week_title(page)
             if not after or after == before:
-                name = f"napta_nav_verify_{ts()}.png"; page.screenshot(path=name, full_page=True)
+                name = f"napta_nav_verify_{ts()}.png"; page.screenshot(path=_shot(name), full_page=True)
                 return False, f"❌ Navigation didn't land on next week. Screenshot -> {name}"
 
             chip_before = (_get_status_chip_text(page) or "").strip().lower()
@@ -566,7 +574,7 @@ class NaptaClient:
 
             if state == "create":
                 if not _click_create(page):
-                    name = f"napta_create_failure_{ts()}.png"; page.screenshot(path=name, full_page=True)
+                    name = f"napta_create_failure_{ts()}.png"; page.screenshot(path=_shot(name), full_page=True)
                     return False, f"❌ Could not click 'Create timesheet' on next week. Screenshot -> {name}"
                 state = _wait_for_timesheet_ready(page, timeout_ms=SHORT_TIMEOUT_MS)
 
@@ -575,10 +583,10 @@ class NaptaClient:
 
             if state == "save":
                 if not _click_save(page):
-                    name = f"napta_save_failure_{ts()}.png"; page.screenshot(path=name, full_page=True)
+                    name = f"napta_save_failure_{ts()}.png"; page.screenshot(path=_shot(name), full_page=True)
                     return False, f"❌ Could not click 'Save' on next week. Screenshot -> {name}"
                 if not _wait_for_save_confirmation(page, prev_chip=chip_before, timeout_s=12):
-                    name = f"napta_save_verify_fail_{ts()}.png"; page.screenshot(path=name, full_page=True)
+                    name = f"napta_save_verify_fail_{ts()}.png"; page.screenshot(path=_shot(name), full_page=True)
                     return False, f"❌ Save didn’t stick for next week (chip stayed “{chip_before or 'unknown'}”). Screenshot -> {name}"
                 return True, "✅ Saved next week (draft)."
 
@@ -601,7 +609,7 @@ class NaptaClient:
                 return True, "ℹ️ Timesheet already submitted for this week (Approval pending)."
 
             if self._on_login_page(page):
-                name = f"napta_login_required_{ts()}.png"; page.screenshot(path=name, full_page=True)
+                name = f"napta_login_required_{ts()}.png"; page.screenshot(path=_shot(name), full_page=True)
                 return False, f"⛔ Napta login required. Please open Napta once in Chrome. Screenshot -> {name}"
 
             state = _wait_for_timesheet_ready(page, timeout_ms=SHORT_TIMEOUT_MS)
@@ -613,18 +621,18 @@ class NaptaClient:
             if state in ("create", "save"):
                 if state == "create":
                     if not _click_create(page):
-                        name = f"napta_create_failure_{ts()}.png"; page.screenshot(path=name, full_page=True)
+                        name = f"napta_create_failure_{ts()}.png"; page.screenshot(path=_shot(name), full_page=True)
                         return False, f"❌ Could not click 'Create timesheet'. Screenshot -> {name}"
                     state = _wait_for_timesheet_ready(page, timeout_ms=SHORT_TIMEOUT_MS)
                 if state == "save":
                     if not _click_save(page):
-                        name = f"napta_save_failure_{ts()}.png"; page.screenshot(path=name, full_page=True)
+                        name = f"napta_save_failure_{ts()}.png"; page.screenshot(path=_shot(name), full_page=True)
                         return False, f"❌ Could not click 'Save'. Screenshot -> {name}"
                     _saw_saved_toast(page)
                     state = _wait_for_timesheet_ready(page, timeout_ms=SHORT_TIMEOUT_MS)
 
             if not _click_submit(page):
-                name = f"napta_submit_failure_{ts()}.png"; page.screenshot(path=name, full_page=True)
+                name = f"napta_submit_failure_{ts()}.png"; page.screenshot(path=_shot(name), full_page=True)
                 return False, f"❌ Could not click 'Submit for approval'. Screenshot -> {name}"
 
             with suppress_exc():
@@ -645,21 +653,21 @@ class NaptaClient:
             page = ctx.new_page(); self._open_timesheet(page)
 
             if self._on_login_page(page):
-                name = f"napta_login_required_{ts()}.png"; page.screenshot(path=name, full_page=True)
+                name = f"napta_login_required_{ts()}.png"; page.screenshot(path=_shot(name), full_page=True)
                 return False, f"⛔ Napta login required. Please open Napta once in Chrome. Screenshot -> {name}"
 
             before = _get_week_title(page)
             if not _go_to_next_week(page):
-                name = f"napta_error_{ts()}.png"; page.screenshot(path=name, full_page=True)
+                name = f"napta_error_{ts()}.png"; page.screenshot(path=_shot(name), full_page=True)
                 return False, f"❌ Could not navigate to next week. Screenshot -> {name}"
             after = _get_week_title(page)
             if not after or after == before:
-                name = f"napta_nav_verify_{ts()}.png"; page.screenshot(path=name, full_page=True)
+                name = f"napta_nav_verify_{ts()}.png"; page.screenshot(path=_shot(name), full_page=True)
                 return False, f"❌ Navigation didn't land on next week. Screenshot -> {name}"
 
             if _has_submit_button(page):
                 if not _click_submit(page):
-                    name = f"napta_submit_failure_{ts()}.png"; page.screenshot(path=name, full_page=True)
+                    name = f"napta_submit_failure_{ts()}.png"; page.screenshot(path=_shot(name), full_page=True)
                     return False, f"❌ Could not click 'Submit for approval' on next week. Screenshot -> {name}"
                 with suppress_exc():
                     if page.locator("text=Approval pending").count():
@@ -670,28 +678,28 @@ class NaptaClient:
 
             if state == "create":
                 if not _click_create(page):
-                    name = f"napta_create_failure_{ts()}.png"; page.screenshot(path=name, full_page=True)
+                    name = f"napta_create_failure_{ts()}.png"; page.screenshot(path=_shot(name), full_page=True)
                     return False, f"❌ Could not click 'Create timesheet' on next week. Screenshot -> {name}"
                 state = _wait_for_timesheet_ready(page, timeout_ms=SHORT_TIMEOUT_MS)
 
             if state == "save":
                 prev_chip = (_get_status_chip_text(page) or "").strip().lower()
                 if not _click_save(page):
-                    name = f"napta_save_failure_{ts()}.png"; page.screenshot(path=name, full_page=True)
+                    name = f"napta_save_failure_{ts()}.png"; page.screenshot(path=_shot(name), full_page=True)
                     return False, f"❌ Could not click 'Save' on next week. Screenshot -> {name}"
                 if not _wait_for_save_confirmation(page, prev_chip=prev_chip, timeout_s=12):
-                    name = f"napta_save_verify_fail_{ts()}.png"; page.screenshot(path=name, full_page=True)
+                    name = f"napta_save_verify_fail_{ts()}.png"; page.screenshot(path=_shot(name), full_page=True)
                     return False, f"❌ Save didn’t stick for next week (chip stayed “{prev_chip or 'unknown'}”). Screenshot -> {name}"
 
             if not _has_submit_button(page):
                 chip = (_get_status_chip_text(page) or "").strip().lower()
                 if chip.startswith(("approval pending", "submitted")):
                     return True, "ℹ️ Next week already submitted (Approval pending)."
-                name = f"napta_submit_absent_{ts()}.png"; page.screenshot(path=name, full_page=True)
+                name = f"napta_submit_absent_{ts()}.png"; page.screenshot(path=_shot(name), full_page=True)
                 return False, "❌ Submit button not visible after saving next week. Screenshot -> " + name
 
             if not _click_submit(page):
-                name = f"napta_submit_failure_{ts()}.png"; page.screenshot(path=name, full_page=True)
+                name = f"napta_submit_failure_{ts()}.png"; page.screenshot(path=_shot(name), full_page=True)
                 return False, f"❌ Could not click 'Submit for approval' on next week. Screenshot -> {name}"
 
             with suppress_exc():
@@ -716,7 +724,7 @@ class NaptaClient:
                 return True, "ℹ️ Timesheet already submitted for this week (Approval pending)."
 
             if self._on_login_page(page):
-                name = f"napta_login_required_{ts()}.png"; page.screenshot(path=name, full_page=True)
+                name = f"napta_login_required_{ts()}.png"; page.screenshot(path=_shot(name), full_page=True)
                 return False, f"⛔ Napta login required. Please open Napta once in Chrome. Screenshot -> {name}"
 
             state = _wait_for_timesheet_ready(page, timeout_ms=SHORT_TIMEOUT_MS)
@@ -727,19 +735,19 @@ class NaptaClient:
 
             if state == "create":
                 if not _click_create(page):
-                    name = f"napta_create_failure_{ts()}.png"; page.screenshot(path=name, full_page=True)
+                    name = f"napta_create_failure_{ts()}.png"; page.screenshot(path=_shot(name), full_page=True)
                     return False, f"❌ Could not click 'Create timesheet'. Screenshot -> {name}"
                 state = _wait_for_timesheet_ready(page, timeout_ms=SHORT_TIMEOUT_MS)
 
             if state == "save":
                 if not _click_save(page):
-                    name = f"napta_save_failure_{ts()}.png"; page.screenshot(path=name, full_page=True)
+                    name = f"napta_save_failure_{ts()}.png"; page.screenshot(path=_shot(name), full_page=True)
                     return False, f"❌ Could not click 'Save'. Screenshot -> {name}"
                 _saw_saved_toast(page)
                 state = _wait_for_timesheet_ready(page, timeout_ms=SHORT_TIMEOUT_MS)
 
             if not _click_submit(page):
-                name = f"napta_submit_failure_{ts()}.png"; page.screenshot(path=name, full_page=True)
+                name = f"napta_submit_failure_{ts()}.png"; page.screenshot(path=_shot(name), full_page=True)
                 return False, f"❌ Could not click 'Submit for approval'. Screenshot -> {name}"
 
             with suppress_exc():
@@ -789,7 +797,7 @@ class NaptaClient:
                 time.sleep(0.2)
 
             name = f"napta_login_timeout_{ts()}.png"
-            with suppress_exc(): page.screenshot(path=name, full_page=True)
+            with suppress_exc(): page.screenshot(path=_shot(name), full_page=True)
             return False, f"Login window timed out. Screenshot -> {name}"
 
         except Exception as e:
@@ -808,17 +816,17 @@ class NaptaClient:
             page = ctx.new_page(); self._open_timesheet(page)
 
             if self._on_login_page(page):
-                name = f"napta_login_required_{ts()}.png"; page.screenshot(path=name, full_page=True)
+                name = f"napta_login_required_{ts()}.png"; page.screenshot(path=_shot(name), full_page=True)
                 return False, f"⛔ Napta login required. Please open Napta once in Chrome. Screenshot -> {name}"
 
             if which == "next":
                 before = _get_week_title(page)
                 if not _go_to_next_week(page):
-                    name = f"napta_error_{ts()}.png"; page.screenshot(path=name, full_page=True)
+                    name = f"napta_error_{ts()}.png"; page.screenshot(path=_shot(name), full_page=True)
                     return False, f"❌ Could not navigate to next week. Screenshot -> {name}"
                 after = _get_week_title(page)
                 if not after or after == before:
-                    name = f"napta_nav_verify_{ts()}.png"; page.screenshot(path=name, full_page=True)
+                    name = f"napta_nav_verify_{ts()}.png"; page.screenshot(path=_shot(name), full_page=True)
                     return False, f"❌ Navigation didn't land on next week. Screenshot -> {name}"
 
             _wait_for_timesheet_ready(page, timeout_ms=DEFAULT_TIMEOUT_MS)
