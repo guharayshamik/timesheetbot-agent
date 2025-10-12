@@ -83,6 +83,7 @@ def _drain_stdin_nonblocking() -> None:
         pass
 
 
+
 # ------------------------------ GovTech flow ---------------------------------
 
 def govtech_loop(profile: dict) -> None:
@@ -156,9 +157,11 @@ def _show_napta_simple_help_block() -> None:
     # Examples
     ex_tbl = Table.grid(padding=(0, 1))
     ex_tbl.add_column()
+    ex_tbl.add_row(_bullet_line("'view' — Show THIS week entries"))
+    ex_tbl.add_row(_bullet_line("'view next week' (or 'vnw') — Show NEXT week entries"))
     ex_tbl.add_row(_bullet_line("'save' — Save THIS week (draft)"))
-    ex_tbl.add_row(_bullet_line("'save next week' — Save NEXT week (draft)"))
     ex_tbl.add_row(_bullet_line("'submit' — Submit THIS week for approval"))
+    ex_tbl.add_row(_bullet_line("'save next week' — Save NEXT week (draft)"))
     ex_tbl.add_row(_bullet_line("'submit next week' — Submit NEXT week for approval"))
     ex_tbl.add_row(_bullet_line("'ss' — Save then Submit (THIS week)"))
     console.print(
@@ -174,7 +177,7 @@ def _show_napta_simple_help_block() -> None:
 
     # Commands
     cmds = Text(
-        "login   save   snw (save next week)   submit   sbnw (submit next week)   ss (save & submit)   back   quit",
+        "login   view   vnw (view next week)   save   snw (save next week)   submit   sbnw (submit next week)   ss (save & submit)   back   quit",
         style="bold magenta",
     )
     console.print(
@@ -198,15 +201,18 @@ def napta_loop(profile: dict) -> None:
     # Napta chat mode UI (chip + examples + commands)
     _show_napta_simple_help_block()
 
-    # Small note boxes
-    console.print(Panel("This uses your browser’s SSO cookies.", border_style="white", box=box.ROUNDED))
-    console.print(
-        Panel(
-            "If a save/submit fails, please open https://app.napta.io once and log in, then retry.",
-            border_style="white",
-            box=box.ROUNDED,
-        )
-    )
+    # Notes
+    console.print(Panel(
+        "This uses your saved session or browser SSO cookies.\n"
+        "‘login’ will open a browser window to sign in once (SSO), then save the session.",
+        border_style="white",
+        box=box.ROUNDED,
+    ))
+    console.print(Panel(
+        "If headless login/save/submit fails, open https://app.napta.io once and sign in, then retry.",
+        border_style="white",
+        box=box.ROUNDED,
+    ))
 
     while True:
         try:
@@ -257,13 +263,94 @@ def napta_loop(profile: dict) -> None:
             panel(msg)
             continue
 
-        # Login (headful, capture session)
+        # Login (headless email-based; no browser pop-up)
+        # if cmd in ("login", "/login"):
+        #     email = (profile or {}).get("email", "").strip()
+        #     if not email:
+        #         email = input_prompt("napta_login_email›").strip()
+        #     if not email:
+        #         panel("⚠️ Email is required for headless login. Try again with 'login' and enter your Napta email.")
+        #         continue
+        #     ok, msg = client.login(email=email)
+        #     panel(msg)
+        #     continue
+
         if cmd in ("login", "/login"):
+            # Headful login: opens a browser window for SSO and saves storage_state
             ok, msg = client.login()
             panel(msg)
             continue
 
-        panel("⚠️ Unknown command. Use: login | save | save next week (snw) | submit | submit next week (sbnw) | ss | back | quit")
+
+        # View THIS week
+        if cmd in ("view", "/view", "show", "/show"):
+            ok, msg = client.view_week("current")
+            panel(msg)
+            continue
+
+        # View NEXT week
+        if cmd in ("view next week", "/view next week", "view-next-week", "/view-next-week", "vnw", "/vnw"):
+            ok, msg = client.view_week("next")
+            panel(msg)
+            continue
+
+        panel("⚠️ Unknown command. Use: login | view | vnw | save | save next week (snw) | submit | submit next week (sbnw) | ss | back | quit")
+
+
+# ------------------------------ Fitnet UI helpers (new look) ------------------
+
+def _fitnet_bullet(s: str, style: str = "white") -> Text:
+    return Text("• ", style="dim") + Text(s, style=style)
+
+def fitnet_examples_block() -> None:
+    tbl = Table.grid(padding=(0, 1))
+    tbl.add_column()
+    tbl.add_row(_fitnet_bullet('"mc on 11 Sep"', "bright_white"))
+    tbl.add_row(_fitnet_bullet('"annual leave 1–3 Aug"', "bright_white"))
+    tbl.add_row(_fitnet_bullet('"/comment 11 Sep OIL"', "bright_white"))
+    console.print(
+        Panel(
+            tbl,
+            title="Examples",
+            title_align="left",
+            border_style="cyan",
+            box=box.ROUNDED,
+            padding=(0, 1),
+        )
+    )
+
+def fitnet_commands_block() -> None:
+    # slash commands (compact, single line like the old UI)
+    slash = Text("/login   /preview   /commit   /show   /clear   /help   /back   /quit",
+                 style="bold magenta")
+    console.print(
+        Panel(
+            slash,
+            title="Commands",
+            title_align="left",
+            border_style="magenta",
+            box=box.ROUNDED,
+            padding=(0, 1),
+        )
+    )
+
+    # natural commands (one panel with bullets, not many boxes)
+    nat = Table.grid(padding=(0, 1))
+    nat.add_column()
+    nat.add_row(_fitnet_bullet("login"))
+    nat.add_row(_fitnet_bullet("preview"))
+    nat.add_row(_fitnet_bullet('commit   (same as “add leave to fitnet”)'))
+    nat.add_row(_fitnet_bullet("add leave to fitnet"))
+    console.print(
+        Panel(
+            nat,
+            title="You can also use natural commands (no slashes):",
+            title_align="left",
+            border_style="white",
+            box=box.ROUNDED,
+            padding=(0, 1),
+        )
+    )
 
 
 # ------------------------------ Fitnet flow ----------------------------------
@@ -321,12 +408,21 @@ def _run_fitnet_applies(commit: bool) -> List[str]:
         lines.append(f"{prefix} {leave_type} {when}: {msg}")
 
     if not commit:
-        lines.append("👀 Preview mode: forms were filled in Fitnet but NOT saved. Review the browser and click Save manually if all looks good.")
-        lines.append("Tip: run `/commit` to save automatically next time.")
+        lines.append("👀 Preview mode: forms were filled in Fitnet but NOT saved. Review the browser if opened and click Save manually if all looks good.")
+        lines.append("Tip: run `commit` (or `add leave to fitnet`) to save automatically next time.")
     else:
         lines.append("📌 Done. Entries should now appear in Fitnet. (Napta will pick it up per your usual nightly sync.)")
 
     return lines
+
+
+def _fitnet_help_panels() -> None:
+    """Old look & feel, but with the refined examples/commands panels."""
+    # Header line like before
+    console.print(Text("Type your leave in plain English, then preview or commit to Fitnet.", style="bold cyan"))
+    # Examples + Commands blocks (new)
+    fitnet_examples_block()
+    fitnet_commands_block()
 
 
 def fitnet_loop(profile: dict) -> None:
@@ -335,23 +431,26 @@ def fitnet_loop(profile: dict) -> None:
     eng.reset_session()
 
     banner(f"{profile.get('name')} <{profile.get('email')}>")
-
-    # If you have the fancy Fitnet headers in ui.py, show them; else show basics
-    try:
-        from .ui import fitnet_header, fitnet_commands
-        fitnet_header(); fitnet_commands()
-    except Exception:
-        panels([
-            "Fitnet (Leave) — safe preview by default.",
-            "Commands: /preview, /commit, /show, /clear, /help, /back, /quit",
-            "Examples:",
-            "  - mc on 11 Sep",
-            "  - annual leave 1–3 Aug",
-            "  - /comment 11 Sep OIL",
-            "Then run `/preview` to prefill Fitnet (no save), or `/commit` to save.",
-        ])
-
+    _fitnet_help_panels()
     print()
+
+    from . import fitnet  # local import
+
+    # normalize helpers for natural commands
+    NAT_ALIASES = {
+        "login": {"/login", "login"},
+        "preview": {"/preview", "preview"},
+        "commit": {"/commit", "commit", "add leave to fitnet", "add leave", "save leaves", "apply leaves"},
+        "show": {"/show", "show"},
+        "clear": {"/clear", "clear"},
+        "help": {"/help", "help", "h", "?"},
+        "back": {"/back", "back"},
+        "quit": {"/quit", "/q", "quit", "q", "/exit", "exit"},
+    }
+
+    def _is(cmd: str, key: str) -> bool:
+        cmd_norm = " ".join(cmd.strip().lower().split())
+        return cmd_norm in NAT_ALIASES[key]
 
     while True:
         try:
@@ -363,55 +462,55 @@ def fitnet_loop(profile: dict) -> None:
         if not s:
             continue
 
-        cmd = s.strip().lower()
+        cmd = s.strip()
 
         # exits
-        if cmd in ("/quit", "/q", "quit", "q", "/exit", "exit"):
+        if _is(cmd, "quit"):
             panel("👋 Bye!")
             sys.exit(0)
-        if cmd == "/back":
+        if _is(cmd, "back"):
             panel("↩️  Back to main menu.")
             return
 
         # help & session mgmt
-        if cmd == "/help":
-            panels([
-                "Fitnet commands:",
-                "  /preview — prefill Fitnet (no save), for all leaves you've typed",
-                "  /commit  — save in Fitnet (careful!)",
-                "  /show    — show the queued leaves",
-                "  /clear   — clear current session",
-                "  /back    — return to main menu",
-            ])
+        if _is(cmd, "help"):
+            _fitnet_help_panels()
             continue
 
-        if cmd == "/show":
+        if _is(cmd, "show"):
             show_session_box()
             continue
 
-        if cmd == "/clear":
+        if _is(cmd, "clear"):
             clear_session()
             panel("🧹 Session cleared.")
             continue
 
+        # login (store creds)
+        if _is(cmd, "login"):
+            ok, msg = fitnet.login()
+            panel(msg)
+            continue
+
         # Preview / Commit actions
-        if cmd == "/preview":
+        if _is(cmd, "preview"):
             panels(_run_fitnet_applies(commit=False))
             continue
 
-        if cmd == "/commit":
+        if _is(cmd, "commit"):
             panels(_run_fitnet_applies(commit=True))
             continue
 
         # Otherwise treat as natural-language leave text (reuse Engine parser)
-        out_lines = eng.handle_text(s)
+        out_lines = eng.handle_text(cmd)
         panels(out_lines)
 
 
 # ------------------------------ main menu ------------------------------------
 
 def main(argv: Optional[list] = None) -> int:
-    banner("Timesheet BOT agent — PALO IT")
+    #banner("Timesheet BOT agent — PALO IT123")
+    banner("CLI Tool")
 
     while True:
         choice = menu("Choose an option:", [
