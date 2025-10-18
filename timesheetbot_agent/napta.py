@@ -1,16 +1,15 @@
 # timesheetbot_agent/napta.py
 from __future__ import annotations
-
 import json
 import os
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Tuple, Optional
-
 from playwright.sync_api import sync_playwright
 import browser_cookie3
 import concurrent.futures
+import re
 
 
 # ----------------------------- Constants / Config -----------------------------
@@ -344,6 +343,118 @@ def _format_rows_table(rows: list[tuple[str, str]]) -> str:
     if total is not None:
         lines.append(f"  = Total: {total:g}h")
     return "\n".join(lines)
+
+
+def _find_timesheet_table(page):
+    # Case-insensitive weekday match in <th> OR any column header role
+    ci = "translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')"
+    weekdays = (
+        "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"
+    )
+    parts = " or ".join([f"contains({ci}, '{d}')" for d in weekdays])
+
+    # A) <table> that has weekday headers in <th>
+    loc = page.locator(
+        f"xpath=//table[.//th[{parts}]]"
+    ).first
+    if loc.count():
+        return loc
+
+    # B) <table> that has elements with role=columnheader containing weekdays
+    loc = page.locator(
+        f"xpath=//table[.//*[@role='columnheader'][{parts}]]"
+    ).first
+    if loc.count():
+        return loc
+
+    # C) ARIA grid fallback: a container marked as table/grid with weekday headers
+    loc = page.locator(
+        f"xpath=//*[@role='table' or @role='grid'][.//*[@role='columnheader'][{parts}] or .//*[self::th or self::div][{parts}]]"
+    ).first
+    if loc.count():
+        return loc
+
+    # D) Last resort: any table after the 'Timesheet' header
+    return page.locator("xpath=(//h1[contains(., 'Timesheet')]/following::table)[1]").first
+
+
+
+def _get_weekday_headers(tbl):
+    """
+    Returns: list[(col_index, label)]
+    Tries 'MONDAY 20-10-2025' → 'Monday 20-10-2025', or just weekday if no date.
+    """
+    headers = []
+    ths = tbl.locator("thead th")
+    if not ths.count():
+        return headers
+
+    day_re = re.compile(
+        r"(MONDAY|TUESDAY|WEDNESDAY|THURSDAY|FRIDAY|SATURDAY|SUNDAY)\b(?:.*?\b(\d{2}-\d{2}-\d{4}))?",
+        re.I,
+    )
+    for i in range(ths.count()):
+        txt = (ths.nth(i).inner_text() or "").strip()
+        m = day_re.search(txt)
+        if m:
+            day = m.group(1).title()
+            date = m.group(2)
+            label = f"{day} {date}" if date else day
+            headers.append((i, label))
+    return headers
+
+
+def _verbatim_grid(tbl, day_cols):
+    """
+    Build a verbatim grid: [(project_name, [cell_texts per day_col ...]), ...]
+    Each cell_text is EXACTLY what Napta displays (prefers visible text from <p> or nested spans).
+    """
+    rows = []
+    body_rows = tbl.locator("tbody tr")
+    for rix in range(body_rows.count()):
+        r = body_rows.nth(rix)
+        tds = r.locator("td")
+        if not tds.count():
+            continue
+
+        # Project label from first cell (trim whitespace)
+        proj = (tds.nth(0).inner_text() or "").strip()
+        if not proj:
+            with suppress_exc():
+                p0 = tds.nth(0).locator("p, div").first
+                if p0.count():
+                    proj = (p0.inner_text() or "").strip()
+        if not proj:
+            continue  # skip empty / spacer rows
+
+        cells_text = []
+        for col_idx, _ in day_cols:
+            if col_idx >= tds.count():
+                cells_text.append("")
+                continue
+            cell = tds.nth(col_idx)
+
+            # Try multiple extraction paths for safety
+            txt = ""
+            with suppress_exc():
+                # prefer plain textContent (includes spans)
+                txt = (cell.evaluate("el => el.textContent") or "").strip()
+            if not txt:
+                with suppress_exc():
+                    txt = (cell.inner_text() or "").strip()
+            if not txt:
+                with suppress_exc():
+                    txt = (cell.inner_html() or "").strip()
+                    # fallback: pull visible numbers like 1.25d
+                    m = re.search(r"([\d\.]+\s*[dh])", txt)
+                    if m:
+                        txt = m.group(1)
+            cells_text.append(txt)
+
+        rows.append((proj, cells_text))
+    return rows
+
+
 
 
 # --------------------------------- Client ------------------------------------
@@ -815,10 +926,12 @@ class NaptaClient:
             browser, ctx = self._build_context(p, headless=True)
             page = ctx.new_page(); self._open_timesheet(page)
 
+            # Auth check
             if self._on_login_page(page):
                 name = f"napta_login_required_{ts()}.png"; page.screenshot(path=_shot(name), full_page=True)
                 return False, f"⛔ Napta login required. Please open Napta once in Chrome. Screenshot -> {name}"
 
+            # Navigate if needed
             if which == "next":
                 before = _get_week_title(page)
                 if not _go_to_next_week(page):
@@ -830,15 +943,49 @@ class NaptaClient:
                     return False, f"❌ Navigation didn't land on next week. Screenshot -> {name}"
 
             _wait_for_timesheet_ready(page, timeout_ms=DEFAULT_TIMEOUT_MS)
-            chip = _get_status_chip_text(page) or "unknown"
-            rows = _extract_week_rows(page)
+            chip  = _get_status_chip_text(page) or "unknown"
             title = _get_week_title(page) or "Week"
-            body = _format_rows_table(rows)
+
+            # <<< VERBATIM TABLE EXTRACTION >>>
+            tbl = _find_timesheet_table(page)
+            if not tbl or not tbl.count():
+                return True, f"🗓 {title}\n{chip}  —  Status: {chip}\nℹ️ Could not locate the timesheet table."
+
+            day_cols = _get_weekday_headers(tbl)
+            if not day_cols:
+                return True, f"🗓 {title}\n{chip}  —  Status: {chip}\nℹ️ Could not find weekday columns."
+
+            grid = _verbatim_grid(tbl, day_cols)
+            if not grid:
+                return True, f"🗓 {title}\n{chip}  —  Status: {chip}\nℹ️ No visible project rows found."
+
+            # Render a simple text table (no conversions, exact cell text)
+            headers = ["Project"] + [label for _, label in day_cols]
+
+            # compute column widths
+            widths = [len(h) for h in headers]
+            for proj, cells in grid:
+                widths[0] = max(widths[0], len(proj))
+                for i, txt in enumerate(cells, start=1):
+                    widths[i] = max(widths[i], len(txt))
+
+            def fmt_row(cols):
+                return " | ".join(c.ljust(w) for c, w in zip(cols, widths))
+
+            lines = []
+            lines.append(fmt_row(headers))
+            lines.append("-+-".join("-" * w for w in widths))
+            for proj, cells in grid:
+                lines.append(fmt_row([proj] + cells))
+
+            body = "\n".join(lines)
             return True, f"🗓 {title}\n{chip}  —  Status: {chip}\n{body}"
+
         finally:
             with suppress_exc():
                 if browser: browser.close()
             p.stop()
+
 
     def preview_week(self, iso_week: str, *, leave_details=None):
         return True, "(preview) Using current week; nothing to preview.", None

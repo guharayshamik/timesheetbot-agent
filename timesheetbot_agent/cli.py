@@ -83,7 +83,6 @@ def _drain_stdin_nonblocking() -> None:
         pass
 
 
-
 # ------------------------------ GovTech flow ---------------------------------
 
 def govtech_loop(profile: dict) -> None:
@@ -263,24 +262,11 @@ def napta_loop(profile: dict) -> None:
             panel(msg)
             continue
 
-        # Login (headless email-based; no browser pop-up)
-        # if cmd in ("login", "/login"):
-        #     email = (profile or {}).get("email", "").strip()
-        #     if not email:
-        #         email = input_prompt("napta_login_email›").strip()
-        #     if not email:
-        #         panel("⚠️ Email is required for headless login. Try again with 'login' and enter your Napta email.")
-        #         continue
-        #     ok, msg = client.login(email=email)
-        #     panel(msg)
-        #     continue
-
         if cmd in ("login", "/login"):
             # Headful login: opens a browser window for SSO and saves storage_state
             ok, msg = client.login()
             panel(msg)
             continue
-
 
         # View THIS week
         if cmd in ("view", "/view", "show", "/show"):
@@ -297,215 +283,6 @@ def napta_loop(profile: dict) -> None:
         panel("⚠️ Unknown command. Use: login | view | vnw | save | save next week (snw) | submit | submit next week (sbnw) | ss | back | quit")
 
 
-# ------------------------------ Fitnet UI helpers (new look) ------------------
-
-def _fitnet_bullet(s: str, style: str = "white") -> Text:
-    return Text("• ", style="dim") + Text(s, style=style)
-
-def fitnet_examples_block() -> None:
-    tbl = Table.grid(padding=(0, 1))
-    tbl.add_column()
-    tbl.add_row(_fitnet_bullet('"mc on 11 Sep"', "bright_white"))
-    tbl.add_row(_fitnet_bullet('"annual leave 1–3 Aug"', "bright_white"))
-    tbl.add_row(_fitnet_bullet('"/comment 11 Sep OIL"', "bright_white"))
-    console.print(
-        Panel(
-            tbl,
-            title="Examples",
-            title_align="left",
-            border_style="cyan",
-            box=box.ROUNDED,
-            padding=(0, 1),
-        )
-    )
-
-def fitnet_commands_block() -> None:
-    # slash commands (compact, single line like the old UI)
-    slash = Text("/login   /preview   /commit   /show   /clear   /help   /back   /quit",
-                 style="bold magenta")
-    console.print(
-        Panel(
-            slash,
-            title="Commands",
-            title_align="left",
-            border_style="magenta",
-            box=box.ROUNDED,
-            padding=(0, 1),
-        )
-    )
-
-    # natural commands (one panel with bullets, not many boxes)
-    nat = Table.grid(padding=(0, 1))
-    nat.add_column()
-    nat.add_row(_fitnet_bullet("login"))
-    nat.add_row(_fitnet_bullet("preview"))
-    nat.add_row(_fitnet_bullet('commit   (same as “add leave to fitnet”)'))
-    nat.add_row(_fitnet_bullet("add leave to fitnet"))
-    console.print(
-        Panel(
-            nat,
-            title="You can also use natural commands (no slashes):",
-            title_align="left",
-            border_style="white",
-            box=box.ROUNDED,
-            padding=(0, 1),
-        )
-    )
-
-
-# ------------------------------ Fitnet flow ----------------------------------
-
-def _key_to_dt(key: str) -> datetime:
-    """
-    Convert Engine's 'dd-Month' key (e.g., '11-September') to a datetime
-    using the current year.
-    """
-    day_str, month_name = key.split("-", 1)
-    day = int(day_str)
-    month = datetime.strptime(month_name, "%B").month
-    year = datetime.now().year
-    return datetime(year, month, day)
-
-
-def _run_fitnet_applies(commit: bool) -> List[str]:
-    """
-    Iterate all queued leaves in the current session and call fitnet.apply_leave.
-    Returns UI lines to display.
-    """
-    from . import fitnet  # local import to avoid circulars if any
-
-    sess = load_session()
-    leaves = sess.get("leave_details", [])
-    remarks = sess.get("remarks", {}) or {}
-
-    if not leaves:
-        return ["⚠️ No leaves recorded yet. Type things like: `mc on 11 Sep` or `annual leave 1–3 Aug`."]
-
-    lines: List[str] = []
-    for (start_key, end_key, leave_type) in leaves:
-        try:
-            start_dt = _key_to_dt(start_key)
-            end_dt = _key_to_dt(end_key)
-        except Exception as e:
-            lines.append(f"❌ Skipped {start_key}–{end_key}: bad date key ({e}).")
-            continue
-
-        comment = remarks.get(start_key, "")
-        half_day = None
-
-        ok, msg, shot = fitnet.apply_leave(
-            start=start_dt,
-            end=end_dt,
-            leave_type=leave_type,
-            comment=comment,
-            half_day=half_day,
-            commit=commit,
-            screenshot_to=None,
-        )
-
-        prefix = "✅" if ok else "❌"
-        when = f"{start_key}" if start_key == end_key else f"{start_key}–{end_key}"
-        lines.append(f"{prefix} {leave_type} {when}: {msg}")
-
-    if not commit:
-        lines.append("👀 Preview mode: forms were filled in Fitnet but NOT saved. Review the browser if opened and click Save manually if all looks good.")
-        lines.append("Tip: run `commit` (or `add leave to fitnet`) to save automatically next time.")
-    else:
-        lines.append("📌 Done. Entries should now appear in Fitnet. (Napta will pick it up per your usual nightly sync.)")
-
-    return lines
-
-
-def _fitnet_help_panels() -> None:
-    """Old look & feel, but with the refined examples/commands panels."""
-    # Header line like before
-    console.print(Text("Type your leave in plain English, then preview or commit to Fitnet.", style="bold cyan"))
-    # Examples + Commands blocks (new)
-    fitnet_examples_block()
-    fitnet_commands_block()
-
-
-def fitnet_loop(profile: dict) -> None:
-    # Fresh parsing session
-    eng = Engine(profile)
-    eng.reset_session()
-
-    banner(f"{profile.get('name')} <{profile.get('email')}>")
-    _fitnet_help_panels()
-    print()
-
-    from . import fitnet  # local import
-
-    # normalize helpers for natural commands
-    NAT_ALIASES = {
-        "login": {"/login", "login"},
-        "preview": {"/preview", "preview"},
-        "commit": {"/commit", "commit", "add leave to fitnet", "add leave", "save leaves", "apply leaves"},
-        "show": {"/show", "show"},
-        "clear": {"/clear", "clear"},
-        "help": {"/help", "help", "h", "?"},
-        "back": {"/back", "back"},
-        "quit": {"/quit", "/q", "quit", "q", "/exit", "exit"},
-    }
-
-    def _is(cmd: str, key: str) -> bool:
-        cmd_norm = " ".join(cmd.strip().lower().split())
-        return cmd_norm in NAT_ALIASES[key]
-
-    while True:
-        try:
-            s = input_prompt("fitnet›")
-        except (EOFError, KeyboardInterrupt):
-            panel("👋 Bye!")
-            return
-
-        if not s:
-            continue
-
-        cmd = s.strip()
-
-        # exits
-        if _is(cmd, "quit"):
-            panel("👋 Bye!")
-            sys.exit(0)
-        if _is(cmd, "back"):
-            panel("↩️  Back to main menu.")
-            return
-
-        # help & session mgmt
-        if _is(cmd, "help"):
-            _fitnet_help_panels()
-            continue
-
-        if _is(cmd, "show"):
-            show_session_box()
-            continue
-
-        if _is(cmd, "clear"):
-            clear_session()
-            panel("🧹 Session cleared.")
-            continue
-
-        # login (store creds)
-        if _is(cmd, "login"):
-            ok, msg = fitnet.login()
-            panel(msg)
-            continue
-
-        # Preview / Commit actions
-        if _is(cmd, "preview"):
-            panels(_run_fitnet_applies(commit=False))
-            continue
-
-        if _is(cmd, "commit"):
-            panels(_run_fitnet_applies(commit=True))
-            continue
-
-        # Otherwise treat as natural-language leave text (reuse Engine parser)
-        out_lines = eng.handle_text(cmd)
-        panels(out_lines)
-
-
 # ------------------------------ main menu ------------------------------------
 
 def main(argv: Optional[list] = None) -> int:
@@ -516,7 +293,6 @@ def main(argv: Optional[list] = None) -> int:
         choice = menu("Choose an option:", [
             "Napta Timesheet",
             "GovTech Timesheet",
-            "Fitnet (Leave)",
             "Registration",
             "Quit",
         ])
@@ -528,15 +304,12 @@ def main(argv: Optional[list] = None) -> int:
             profile = ensure_profile()
             govtech_loop(profile)
         elif choice == "3":
-            profile = ensure_profile()
-            fitnet_loop(profile)
-        elif choice == "4":
             run_registration_interactive()
-        elif choice == "5":
+        elif choice == "4":
             panel("Goodbye! 👋")
             return 0
         else:
-            panel("Please pick 1–5.")
+            panel("Please pick 1–4.")
 
 
 if __name__ == "__main__":
