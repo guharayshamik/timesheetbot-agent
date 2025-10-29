@@ -200,14 +200,25 @@ def napta_loop(profile: dict) -> None:
 
     # Notes
     console.print(Panel(
-        "This uses your saved session or browser SSO cookies.\n"
-        "‘login’ will open a browser window to sign in once (SSO), to let the bot save your session. Just ‘login’ once.",
+        "Tool uses your saved session or browser SSO cookies. ‘login’ will open a browser window to sign in once (SSO), to let the bot save your session.\n"
+        "Just ‘login’ once.",
         border_style="white", box=box.ROUNDED,
     ))
-    console.print(Panel(
-        "If headless login/save/submit fails, open https://app.napta.io once and sign in, then retry.",
-        border_style="white", box=box.ROUNDED,
-    ))
+    # console.print(Panel(
+    #     "If headless login/save/submit fails, open https://app.napta.io once and sign in, then retry.",
+    #     border_style="white", box=box.ROUNDED,
+    # ))
+    # console.print(Panel(
+    #     "Performance tip: Using a VPN can slow down Napta actions (page loads, navigation, submit) due to latency. "
+    #     "For the fastest results, run this tool **without VPN** when possible, then reconnect after you’re done.",
+    #     border_style="yellow",
+    #     box=box.ROUNDED,
+    # ))
+    console.print(Panel(Text(
+    "🚀 Performance Tip: Using a VPN can slow down Napta actions (page loads, navigation, submit). "
+    "For best speed, run this tool WITHOUT VPN, then reconnect when done.",
+    style="bold bright_red",
+    )))
 
     while True:
         try:
