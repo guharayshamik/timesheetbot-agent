@@ -2,8 +2,7 @@
 from __future__ import annotations
 
 import sys
-from typing import Optional, List
-from datetime import datetime
+from typing import Optional
 
 # UI
 from .ui import (
@@ -13,7 +12,6 @@ from .ui import (
     input_prompt,
     panel,
     panels,
-    note,
     show_vibrant_help,
 )
 
@@ -24,7 +22,6 @@ from .napta import NaptaClient
 from .engine import Engine
 from .storage import (
     load_profile,
-    save_profile,
     load_session,
     clear_session,
     clear_profile,
@@ -34,15 +31,30 @@ from .registration import run_registration_interactive
 # Pretty blocks
 from rich.text import Text
 from rich.panel import Panel
-from rich.table import Table
 from rich import box
+from rich.table import Table  # used in Napta help block
 
+from pathlib import Path
 
-HELP_TEXT = (
-    "Type in natural language (or use commands):\n"
-    "  – e.g. 'AL 1st to 3rd June', 'sick leave on 10 Sep', '5 and 7 Aug mc'\n"
-    "Commands: /show, /clear, /deregister, /generate, /comment, /help, /back, /email, /quit"
-)
+# Matches napta.py’s screenshot directory:
+_SHOT_DIR = (Path.home() / ".tsbot" / "napta" / "shots").resolve()
+
+# def _maybe_add_shot_hint(text: str) -> str:
+#     # Only append when a screenshot was mentioned
+#     if "Screenshot ->" in (text or ""):
+#         return f"{text}\n📁 All screenshots are saved in: {_SHOT_DIR}"
+#     return text
+
+def _maybe_add_shot_hint(text: str) -> str:
+    # Add help for timeouts
+    if text.startswith("⏰"):
+        return f"{text}\n💡 Tip: Check your internet connection or re-login with `login` if the issue persists."
+
+    # Add screenshot path info
+    if "Screenshot ->" in (text or ""):
+        return f"{text}\n📁 All screenshots are saved in: {_SHOT_DIR}"
+
+    return text
 
 
 # ------------------------------ profile helpers ------------------------------
@@ -58,19 +70,14 @@ def ensure_profile() -> dict:
 # ------------------------------ generic helpers ------------------------------
 
 def show_help() -> None:
-    panels([HELP_TEXT])
-
+    panels(["Type your timesheet details or use the commands shown in the help blocks."])
 
 def show_session_box() -> None:
     sess = load_session()
     month = sess.get("month", "—")
     leaves = sess.get("leave_details", [])
-    lines = [
-        f"Month: {month}",
-        f"Leave details: {leaves}",
-    ]
+    lines = [f"Month: {month}", f"Leave details: {leaves}"]
     panels(lines)
-
 
 def _drain_stdin_nonblocking() -> None:
     """Swallow any pending newlines so we don't print a duplicate prompt."""
@@ -79,8 +86,7 @@ def _drain_stdin_nonblocking() -> None:
         while select.select([sys.stdin], [], [], 0)[0]:
             sys.stdin.readline()
     except Exception:
-        # best effort; ignore on platforms without select
-        pass
+        pass  # best effort
 
 
 # ------------------------------ GovTech flow ---------------------------------
@@ -115,21 +121,16 @@ def govtech_loop(profile: dict) -> None:
             return
 
         if cmd == "/help":
-            show_help()
-            continue
+            show_help(); continue
 
         if cmd == "/show":
-            show_session_box()
-            continue
+            show_session_box(); continue
 
         if cmd == "/clear":
-            clear_session()
-            panel("🧹 Session cleared.")
-            continue
+            clear_session(); panel("🧹 Session cleared."); continue
 
         if cmd == "/deregister":
-            clear_profile()
-            clear_session()
+            clear_profile(); clear_session()
             panel("👋 Deregistered and session cleared. Returning to main menu.")
             return
 
@@ -138,14 +139,13 @@ def govtech_loop(profile: dict) -> None:
         panels(out_lines)
 
 
-# ------------------------------ Napta (simple) --------------------------------
+# ------------------------------ Napta (chat) ---------------------------------
 
 def _bullet_line(s: str, style: str = "bold green") -> Text:
     return Text("• ", style="dim") + Text(s, style=style)
 
-
 def _show_napta_simple_help_block() -> None:
-    """Pretty 'NAPTA Chat mode ON + examples + commands' block."""
+    """Pretty 'NAPTA Chat mode ON + examples + commands' block (edit features removed)."""
     # Chip header
     chip = Text.assemble(("⚡  NAPTA Chat mode", "bold"), ("  ON", "bold bright_green"))
     console.print(Panel(chip, border_style="bright_green", padding=(0, 1), box=box.SQUARE))
@@ -153,41 +153,39 @@ def _show_napta_simple_help_block() -> None:
     # Subtitle
     console.print(Text("Describe your Napta action in plain English, e.g.:", style="bold cyan"))
 
-    # Examples
+    # Examples (only view/save/submit flows)
     ex_tbl = Table.grid(padding=(0, 1))
     ex_tbl.add_column()
-    ex_tbl.add_row(_bullet_line("'view' — Show THIS week entries"))
+    ex_tbl.add_row(_bullet_line("'login' — Sign in once (SSO) using cli and save the session"))
+    ex_tbl.add_row(_bullet_line("'view' — Show CURRENT week entries"))
     ex_tbl.add_row(_bullet_line("'view next week' (or 'vnw') — Show NEXT week entries"))
-    ex_tbl.add_row(_bullet_line("'save' — Save THIS week (draft)"))
-    ex_tbl.add_row(_bullet_line("'submit' — Submit THIS week for approval"))
-    ex_tbl.add_row(_bullet_line("'save next week' — Save NEXT week (draft)"))
-    ex_tbl.add_row(_bullet_line("'submit next week' — Submit NEXT week for approval"))
-    ex_tbl.add_row(_bullet_line("'ss' — Save then Submit (THIS week)"))
+    ex_tbl.add_row(_bullet_line("'save' — Save CURRENT week (draft)"))
+    ex_tbl.add_row(_bullet_line("'submit' — Submit CURRENT week for approval"))
+    ex_tbl.add_row(_bullet_line("'save next week' (or 'snw') — Save NEXT week (draft)"))
+    ex_tbl.add_row(_bullet_line("'submit next week' (or 'sbnw') — Submit NEXT week for approval"))
+    ex_tbl.add_row(_bullet_line("'ss' — Save then Submit (CURRENT week)"))
     console.print(
-        Panel(
-            ex_tbl,
-            title="Examples",
-            title_align="left",
-            border_style="cyan",
-            box=box.ROUNDED,
-            padding=(0, 1),
-        )
+        Panel(ex_tbl, title="Examples", title_align="left", border_style="cyan", box=box.ROUNDED, padding=(0, 1))
     )
 
-    # Commands
+    # Commands — one per line
     cmds = Text(
-        "login   view   vnw (view next week)   save   snw (save next week)   submit   sbnw (submit next week)   ss (save & submit)   back   quit",
+        "\n".join([
+            "login",
+            "view",
+            "vnw (view next week)",
+            "save",
+            "snw (save next week)",
+            "submit",
+            "sbnw (submit next week)",
+            "ss (save & submit this week)",
+            "back",
+            "quit",
+        ]),
         style="bold magenta",
     )
     console.print(
-        Panel(
-            cmds,
-            title="Commands",
-            title_align="left",
-            border_style="magenta",
-            box=box.ROUNDED,
-            padding=(0, 1),
-        )
+        Panel(cmds, title="Commands", title_align="left", border_style="magenta", box=box.ROUNDED, padding=(0, 1))
     )
 
 
@@ -203,27 +201,28 @@ def napta_loop(profile: dict) -> None:
     # Notes
     console.print(Panel(
         "This uses your saved session or browser SSO cookies.\n"
-        "‘login’ will open a browser window to sign in once (SSO), then save the session.",
-        border_style="white",
-        box=box.ROUNDED,
+        "‘login’ will open a browser window to sign in once (SSO), to let the bot save your session. Just ‘login’ once.",
+        border_style="white", box=box.ROUNDED,
     ))
     console.print(Panel(
         "If headless login/save/submit fails, open https://app.napta.io once and sign in, then retry.",
-        border_style="white",
-        box=box.ROUNDED,
+        border_style="white", box=box.ROUNDED,
     ))
 
     while True:
         try:
             _drain_stdin_nonblocking()
-            cmd = input_prompt("napta›").strip().lower()
+            raw = input_prompt("napta›")
         except (EOFError, KeyboardInterrupt):
             panel("👋 Bye!")
             return
 
-        if not cmd:
+        if not raw:
             continue
 
+        cmd = raw.strip().lower()
+
+        # Generic exits
         if cmd in ("/quit", "/q", "quit", "q", "/exit", "exit"):
             panel("👋 Bye!")
             sys.exit(0)
@@ -232,63 +231,43 @@ def napta_loop(profile: dict) -> None:
             panel("↩️  Back to main menu.")
             return
 
-        # Save NEXT week
-        if cmd in ("save next week", "/save next week", "save-next-week", "/save-next-week", "snw", "/snw"):
-            ok, msg = client.save_next_week()
-            panel(msg)
-            continue
-
-        # Submit NEXT week
-        if cmd in ("submit next week", "/submit next week", "submit-next-week", "/submit-next-week", "sbnw", "/sbnw"):
-            ok, msg = client.submit_next_week()
-            panel(msg)
-            continue
-
-        # Save THIS week
-        if cmd in ("save", "/save"):
-            ok, msg = client.save_current_week()
-            panel(msg)
-            continue
-
-        # Submit THIS week
-        if cmd in ("submit", "/submit"):
-            ok, msg = client.submit_current_week()
-            panel(msg)
-            continue
-
-        # Save & Submit THIS week
-        if cmd in ("ss", "/ss"):
-            ok, msg = client.save_and_submit_current_week()
-            panel(msg)
-            continue
-
+        # ---------- Allowed simple commands only ----------
         if cmd in ("login", "/login"):
-            # Headful login: opens a browser window for SSO and saves storage_state
-            ok, msg = client.login()
-            panel(msg)
-            continue
+            ok, msg = client.login(); panel(_maybe_add_shot_hint(msg)); continue
 
-        # View THIS week
         if cmd in ("view", "/view", "show", "/show"):
-            ok, msg = client.view_week("current")
-            panel(msg)
-            continue
+            ok, msg = client.view_week("current"); panel(_maybe_add_shot_hint(msg)); continue
 
-        # View NEXT week
         if cmd in ("view next week", "/view next week", "view-next-week", "/view-next-week", "vnw", "/vnw"):
-            ok, msg = client.view_week("next")
-            panel(msg)
-            continue
+            ok, msg = client.view_week("next"); panel(_maybe_add_shot_hint(msg)); continue
 
-        panel("⚠️ Unknown command. Use: login | view | vnw | save | save next week (snw) | submit | submit next week (sbnw) | ss | back | quit")
+        if cmd in ("save", "/save"):
+            ok, msg = client.save_current_week(); panel(_maybe_add_shot_hint(msg)); continue
+
+        if cmd in ("save next week", "/save next week", "save-next-week", "/save-next-week", "snw", "/snw"):
+            ok, msg = client.save_next_week(); panel(_maybe_add_shot_hint(msg)); continue
+
+        if cmd in ("submit", "/submit"):
+            ok, msg = client.submit_current_week(); panel(_maybe_add_shot_hint(msg)); continue
+
+        if cmd in ("submit next week", "/submit next week", "submit-next-week", "/submit-next-week", "sbnw", "/sbnw"):
+            ok, msg = client.submit_next_week(); panel(_maybe_add_shot_hint(msg)); continue
+
+        if cmd in ("ss", "/ss"):
+            ok, msg = client.save_and_submit_current_week(); panel(_maybe_add_shot_hint(msg)); continue
+
+        # Fallback
+        panel(
+            "⚠️ Unknown command. Use one of:\n"
+            "login\nview\nvnw (view next week)\nsave\nsnw (save next week)\n"
+            "submit\nsbnw (submit next week)\nss (save & submit this week)\nback\nquit"
+        )
 
 
 # ------------------------------ main menu ------------------------------------
 
 def main(argv: Optional[list] = None) -> int:
-    #banner("Timesheet BOT agent — PALO IT123")
     banner("CLI Tool")
-
     while True:
         choice = menu("Choose an option:", [
             "Napta Timesheet",
@@ -310,7 +289,6 @@ def main(argv: Optional[list] = None) -> int:
             return 0
         else:
             panel("Please pick 1–4.")
-
 
 if __name__ == "__main__":
     raise SystemExit(main())
