@@ -143,16 +143,38 @@ def _parse_single_no_month(text: str) -> Optional[int]:
     return None
 
 
+# def _month_from_text(text: str) -> Optional[str]:
+#     m = re.search(r"\b(for|in)\s+([A-Za-z]{3,9})\b", text, flags=re.I)
+#     if m:
+#         return _full_month_name(m.group(2))
+#     m2 = re.search(r"\b([A-Za-z]{3,9})\s+(timesheet|sheet)\b", text, flags=re.I)
+#     if m2:
+#         return _full_month_name(m2.group(1))
+#     m3 = re.search(r"\b([A-Za-z]{3,9})\b", text, flags=re.I)
+#     if m3 and re.search(r"\b(generate|submit|create)\b", text, flags=re.I):
+#         return _full_month_name(m3.group(1))
+#     return None
+
 def _month_from_text(text: str) -> Optional[str]:
+    # 1) explicit "for|in <Month>"
     m = re.search(r"\b(for|in)\s+([A-Za-z]{3,9})\b", text, flags=re.I)
     if m:
-        return _full_month_name(m.group(2))
-    m2 = re.search(r"\b([A-Za-z]{3,9})\s+(timesheet|sheet)\b", text, flags=re.I)
+        mon = _full_month_name(m.group(2))
+        if mon:
+            return mon
+
+    # 2) "<Month> (timesheet|sheet|ts)"
+    m2 = re.search(r"\b([A-Za-z]{3,9})\s+(?:timesheet|sheet|ts)\b", text, flags=re.I)
     if m2:
-        return _full_month_name(m2.group(1))
-    m3 = re.search(r"\b([A-Za-z]{3,9})\b", text, flags=re.I)
-    if m3 and re.search(r"\b(generate|submit|create)\b", text, flags=re.I):
-        return _full_month_name(m3.group(1))
+        mon = _full_month_name(m2.group(1))
+        if mon:
+            return mon
+
+    # 3) Fallback: scan all tokens and return the first that is a month
+    for tok in re.findall(r"\b([A-Za-z]{3,9})\b", text, flags=re.I):
+        mon = _full_month_name(tok)
+        if mon:
+            return mon
     return None
 
 def _std_day(tok: str) -> Optional[int]:
@@ -374,8 +396,13 @@ class Engine:
 
 
         # ---- generate intent?
-        wants_generate = bool(re.search(r"\b(generate|submit|create)\b.*\b(timesheet|sheet)\b", text, flags=re.I)) \
-                         or bool(re.search(r"^/generate\b|\bgenerate\b", text, flags=re.I))
+        # wants_generate = bool(re.search(r"\b(generate|submit|create)\b.*\b(timesheet|sheet)\b", text, flags=re.I)) \
+        #                  or bool(re.search(r"^/generate\b|\bgenerate\b", text, flags=re.I))
+        
+        wants_generate = (
+            bool(re.search(r"\b(generate|submit|create)\b.*\b(timesheet|sheet|ts)\b", text, flags=re.I))
+            or bool(re.search(r"^/(?:generate)\b|\bgenerate\b", text, flags=re.I))
+        )
 
         # ---- current month?
         month_mentioned = _month_from_text(text)
@@ -472,7 +499,7 @@ class Engine:
                 "Regards,",
                 employee,
             ]
-            body = "\r\n".join(body_lines)
+            body = "\n".join(body_lines)
 
             # --- CC: user's email + Finance ---
             cc_candidates = [

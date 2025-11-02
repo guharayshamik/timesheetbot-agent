@@ -209,13 +209,15 @@ def _show_govtech_examples_compact() -> None:
     """Compact teaser: a few natural-language examples + a tip to type help."""
     ex_tbl = Table.grid(padding=(0, 1))
     ex_tbl.add_column()
-    ex_tbl.add_row(_bullet_line('"generate timesheet for August"'))
+    ex_tbl.add_row(_bullet_line('"generate timesheet/gen ts for August/Aug"'))
     ex_tbl.add_row(_bullet_line('"annual leave/al 11–13 Aug"'))
     ex_tbl.add_row(_bullet_line('"sick leave/sl/mc on 11 Aug"'))
     ex_tbl.add_row(_bullet_line('"child care/cc on 12–13 Aug"'))
+    ex_tbl.add_row(_bullet_line('"half day on 12–13 Aug"'))
+    ex_tbl.add_row(_bullet_line('"ns leave on 12–13 Aug"'))
     #ex_tbl.add_row(_bullet_line('"generate" — Create a new timesheet'))
-    ex_tbl.add_row(_bullet_line('"email" — Email generated timesheet to your registered manager'))
-    ex_tbl.add_row(_bullet_line('"help" — Show available commands'))
+    ex_tbl.add_row(_bullet_line('"email/eml" — Email generated timesheet to your registered manager'))
+    ex_tbl.add_row(_bullet_line('"help/h/hlp" — Show available commands'))
     console.print(
         Panel(
             ex_tbl,
@@ -245,6 +247,7 @@ def show_govtech_help_detailed() -> None:
 
     # Natural language / short-form intents
     ex_tbl.add_row(_bullet_line('"generate timesheet for August"'))
+    ex_tbl.add_row(_bullet_line('"gen ts Oct"'))
     ex_tbl.add_row(_bullet_line('"annual leave 11–13 Aug"'))
     ex_tbl.add_row(_bullet_line('"al on 11–13 Aug"'))
     ex_tbl.add_row(_bullet_line('"al on 11 Aug"'))
@@ -262,14 +265,14 @@ def show_govtech_help_detailed() -> None:
 
     # Other commands (unchanged style/format)
     ex_tbl.add_row(_bullet_line('"show" — Display current saved data'))
-    ex_tbl.add_row(_bullet_line('"clear" — Clear current entries'))
+    ex_tbl.add_row(_bullet_line('"clear/clr" — Clear current entries'))
     ex_tbl.add_row(_bullet_line('"deregister" — Remove your profile from bot'))
-    ex_tbl.add_row(_bullet_line('"generate" — Create a new timesheet'))
-    ex_tbl.add_row(_bullet_line('"comment" — Add remarks to a specific date; This will add comments in the "Remarks" column inside excel'))
-    ex_tbl.add_row(_bullet_line('"email" — Email generated timesheet to your registered manager'))
-    ex_tbl.add_row(_bullet_line('"help" — Show available commands'))
+    ex_tbl.add_row(_bullet_line('"generate/gen ts" — Create a new timesheet'))
+    ex_tbl.add_row(_bullet_line('"comment/remarks" — Add remarks to a specific date; This will add comments in the "Remarks" column inside excel'))
+    ex_tbl.add_row(_bullet_line('"email/eml" — Email generated timesheet to your registered manager'))
+    ex_tbl.add_row(_bullet_line('"help/h/hlp" — Show available commands'))
     ex_tbl.add_row(_bullet_line('"back" — Return to previous menu'))
-    ex_tbl.add_row(_bullet_line('"quit" — Exit the tool'))
+    ex_tbl.add_row(_bullet_line('"quit/q" — Exit the tool'))
 
     console.print(
         Panel(
@@ -420,20 +423,20 @@ def main(argv: Optional[list] = None) -> int:
     banner("CLI Tool")
     while True:
         choice = menu("Choose an option:", [
-            "Napta Timesheet",
-            "GovTech Timesheet",
-            "Registration",
-            "Quit",
-        ])
+        "GovTech Timesheet",
+        "Registration (GovTech entries)",
+        "Napta Timesheet",
+        "Quit",
+    ])
 
         if choice == "1":
             profile = ensure_profile()
-            napta_loop(profile)
+            govtech_loop(profile)                 # GovTech first
         elif choice == "2":
-            profile = ensure_profile()
-            govtech_loop(profile)
+            run_registration_interactive()        # Registration second
         elif choice == "3":
-            run_registration_interactive()
+            profile = ensure_profile()
+            napta_loop(profile)                   # Napta third
         elif choice == "4":
             panel("Goodbye! 👋")
             return 0
