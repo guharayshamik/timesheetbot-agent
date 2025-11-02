@@ -3,73 +3,72 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Tuple, Optional
+from typing import Optional, Tuple
+
+# Optional dependency; used only as a fallback
+try:
+    import browser_cookie3
+except Exception:  # pragma: no cover
+    browser_cookie3 = None  # type: ignore
 
 from playwright.sync_api import sync_playwright
-import browser_cookie3
-import concurrent.futures
+from playwright._impl._errors import TimeoutError as PlaywrightTimeoutError
+
+
+# ──────────────────────────────── Config / Paths ───────────────────────────────
 
 DEFAULT_APP_URL = "https://app.napta.io/timesheet"
 
-# Absolute XPaths observed in your tenant
+# Fallback XPaths (last-resort)
 SAVE_BTN_XPATH = '/html/body/div[1]/div[2]/div[1]/div[2]/div[2]/button'
 THIS_WEEK_BTN_XPATH = '/html/body/div[1]/div[2]/div[1]/div[2]/div[2]/div/button[2]'
-
-# Next-week nav (prefer stable data-cy, keep XPath fallback shared earlier)
 NEXT_WEEK_CY = '[data-cy="PeriodNavigation_navRight"]'
 NEXT_WEEK_BTN_XPATH = '/html/body/div[1]/div[2]/div[1]/div[2]/div[2]/div/button[3]'
-
-# Create/creation selectors
 CREATE_BTN_XPATH = '//button[contains(normalize-space(.), "Create")]'
 CREATE_TIMESHEET_XPATH = '//button[contains(normalize-space(.), "Create timesheet")]'
 
-# Cache paths
-_CACHE_DIR = Path(os.path.expanduser("~/.cache/timesheetbot"))
-_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-_COOKIE_CACHE = _CACHE_DIR / "napta_cookies.json"
-STATE_PATH = _CACHE_DIR / "napta_storage_state.json"  # persisted after login()
+# Store under ~/.tsbot/napta (tighter perms than ~/.cache)
+_APP_DIR = Path.home() / ".tsbot" / "napta"
+_APP_DIR.mkdir(parents=True, exist_ok=True)
+try:
+    os.chmod(_APP_DIR, 0o700)
+except Exception:
+    pass
 
-# Light network slimming
+STATE_PATH = _APP_DIR / "napta_storage_state.json"   # canonical storage_state
+_COOKIE_CACHE = _APP_DIR / "napta_cookies.json"      # fallback only
+_SCREENSHOT_DIR = _APP_DIR / "shots"
+_SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+
+def _shot(name: str) -> str:
+    return str(_SCREENSHOT_DIR / name)
+
+# Slim some network requests (helps speed)
 _ANALYTICS_HOSTS = (
-    "googletagmanager.com",
-    "google-analytics.com",
-    "segment.io",
-    "sentry.io",
-    "plausible.io",
-    "fullstory.com",
-    "intercom.io",
-    "hotjar.com",
-    "gravatar.com",
-    "unpkg.com",
+    "googletagmanager.com", "google-analytics.com", "segment.io", "sentry.io",
+    "plausible.io", "fullstory.com", "intercom.io", "hotjar.com",
+    "gravatar.com", "unpkg.com",
 )
 
-# Timeouts (lean for speed; keep LONG for SSO login)
+# Timeouts
 SHORT_TIMEOUT_MS = 4_000
-DEFAULT_TIMEOUT_MS = 5_000
-LONG_TIMEOUT_MS = 300_000  # for headful SSO during login()
+DEFAULT_TIMEOUT_MS = int(os.environ.get("NAPTA_TIMEOUT_MS", "30000"))  # 30s
 
 UA_DESKTOP = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/122.0 Safari/537.36"
 )
 
-
-class NaptaAuthError(RuntimeError):
-    """Raised when SSO/app login is required or session is expired."""
-    pass
-
-
-# ---------- tiny utility helpers ----------
+# ────────────────────────────────── Utilities ─────────────────────────────────
 
 def ts() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")
 
-
 class suppress_exc:
-    """Context manager: suppress any exception; optionally re-raise at end."""
     def __init__(self, raise_on_fail: bool = False):
         self.raise_on_fail = raise_on_fail
         self._exc = None
@@ -77,51 +76,184 @@ class suppress_exc:
         return self
     def __exit__(self, exc_type, exc, tb):
         self._exc = exc
-        return not self.raise_on_fail  # suppress if not raising
-
+        return not self.raise_on_fail
 
 def _route_slim(route):
     req = route.request
-    rtype = req.resource_type
-    url = req.url
-    if rtype in ("image", "media", "font"):
+    if req.resource_type in ("image", "media", "font"):
         return route.abort()
+    url = req.url
     if url.endswith((".map", ".svg")):
         return route.abort()
     if any(h in url for h in _ANALYTICS_HOSTS):
         return route.abort()
     return route.continue_()
 
+class NaptaAuthError(RuntimeError):
+    pass
 
-# ---------- core helpers ----------
+def _proxy_conf():
+    url = os.getenv("PLAYWRIGHT_PROXY") or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
+    return {"server": url} if url else None
+
+def _safe_run(fn, label: str = "operation"):
+    """Run a Playwright action with graceful timeout recovery."""
+    try:
+        return fn(), None
+    except PlaywrightTimeoutError:
+        return None, f"⏰ The {label} took too long (timed out). Please retry in a few seconds."
+    except Exception as e:
+        return None, f"⚠️ Unexpected error during {label}: {e}"
+
+
+# ────────────────────────────── Page read helpers ─────────────────────────────
 
 def _get_status_chip_text(page) -> str:
-    """
-    Read the small status chip near the top header (avoid the legend at the bottom).
-    Tries a few header-scoped containers before falling back to a strict single-word match.
-    """
-    # Candidates likely around the week header / action buttons
     containers = [
-        "header",                      # top header if present
-        "main >> div:near(:text('This week'), 800)",  # area close to "This week"
+        "header",
+        "main >> div:near(:text('This week'), 800)",
         "main >> div:has(button:has-text('Submit for approval'))",
         "main >> div:has(button:has-text('Save'))",
-        "main",                        # fallback but still exclude legend via strict match below
+        "main",
     ]
-
-    # Strict single-word/status matching to avoid picking legend text
-    status_regex = r'^(Not created|Draft|Open|Approval pending|Submitted)$'
-
+    status_regex = r'^(Not created|Draft|Open|Validated|Approval pending|Submitted)$'
     for scope in containers:
         with suppress_exc():
             loc = page.locator(f"{scope} >> text=/{status_regex}/i").first
             if loc.count():
                 text = (loc.inner_text() or "").strip()
-                # Guard against long legend strings (should be exactly the status)
-                if text and len(text) <= 20:
+                if text and len(text) <= 30:
                     return text
     return ""
 
+
+
+def _get_week_title(page) -> str:
+    # Prefer common date-range labels like "21–25 Oct 2025" or "21 Oct – 25 Oct"
+    date_word = r"(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
+    range_re = re.compile(
+        rf"\b(\d{{1,2}}(?:\s*[–-]\s*\d{{1,2}})?\s*{date_word}(?:\s*[–-]\s*\d{{1,2}}\s*{date_word})?\s*(?:\d{{4}})?)\b",
+        re.I,
+    )
+    # Support numeric styles, e.g. "W45 from 03-11-2025 to 09-11-2025" or "03-11-2025 – 09-11-2025"
+    numeric_w_re = re.compile(
+        r"\bW\d{1,2}\s+from\s+\d{2}-\d{2}-\d{4}\s+to\s+\d{2}-\d{2}-\d{4}\b",
+        re.I,
+    )
+    numeric_range_re = re.compile(
+        r"\b\d{1,2}-\d{1,2}-\d{4}\s*(?:–|-|to)\s*\d{1,2}-\d{1,2}-\d{4}\b",
+        re.I,
+    )
+
+    # A) Period label near navigation
+    with suppress_exc():
+        loc = page.locator('[data-cy*="Period"][data-cy*="Label"], [aria-live="polite"]').first
+        if loc.count():
+            txt = (loc.inner_text() or "").strip()
+            # Try month-name range
+            m = range_re.search(txt)
+            if m:
+                return m.group(1)
+            # Try numeric "W## from DD-MM-YYYY to DD-MM-YYYY"
+            m2 = numeric_w_re.search(txt)
+            if m2:
+                return m2.group(0)
+            # Try generic numeric "DD-MM-YYYY – DD-MM-YYYY"
+            m3 = numeric_range_re.search(txt)
+            if m3:
+                return m3.group(0)
+
+    # B) Any visible element that looks like a date-range (month-name)
+    with suppress_exc():
+        loc = page.locator("text=/\\d{1,2}\\s*[–-]\\s*\\d{1,2}\\s*(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)/i").first
+        if loc.count():
+            return (loc.inner_text() or "").strip()
+
+    # B2) Any visible element that looks like a purely numeric range
+    with suppress_exc():
+        loc = page.locator("text=/\\b\\d{2}-\\d{2}-\\d{4}\\s*(?:–|-|to)\\s*\\d{2}-\\d{2}-\\d{4}\\b/i").first
+        if loc.count():
+            return (loc.inner_text() or "").strip()
+
+    # C) Back-compat headings
+    with suppress_exc():
+        h = page.locator("h1,h2,h3").filter(has_text=re.compile(r"week", re.I)).first
+        if h.count():
+            t = (h.inner_text() or "").strip()
+            if t:
+                return t
+
+    # D) "Week 42"
+    with suppress_exc():
+        t = page.locator("text=/Week\\s+\\d+/i").first
+        if t.count():
+            return (t.inner_text() or "").strip()
+    return ""
+
+def _labels_from_title(title: str) -> list[str]:
+    """
+    Build clean weekday labels from a title like:
+      - 'W45 from 03-11-2025 to 09-11-2025'
+      - '03-11-2025 – 09-11-2025'
+      - '21–25 Oct 2025'  (we will expand based on the start date)
+    Returns labels like: ['Monday 03-11-2025', 'Tuesday 04-11-2025', ...]
+    """
+    import re
+    from datetime import datetime, timedelta
+
+    title = (title or "").strip()
+
+    # Try numeric "from ... to ..."
+    m = re.search(r"\bfrom\s+(\d{2}-\d{2}-\d{4})\s+to\s+(\d{2}-\d{2}-\d{4})\b", title, flags=re.I)
+    if not m:
+        # Try generic numeric range "DD-MM-YYYY – DD-MM-YYYY" or "... - ..."
+        m = re.search(r"\b(\d{2}-\d{2}-\d{4})\s*(?:–|-|to)\s*(\d{2}-\d{2}-\d{4})\b", title, flags=re.I)
+    if m:
+        start = datetime.strptime(m.group(1), "%d-%m-%Y")
+        end = datetime.strptime(m.group(2), "%d-%m-%Y")
+        days = (end - start).days + 1
+        days = max(1, min(days, 7))  # clamp to 1..7
+        out = []
+        for i in range(days):
+            d = start + timedelta(days=i)
+            out.append(f"{d.strftime('%A')} {d.strftime('%d-%m-%Y')}")
+        return out
+
+    # Try textual month like "21–25 Oct 2025" → expand 5 days
+    m = re.search(
+        r"\b(\d{1,2})\s*[–-]\s*(\d{1,2})\s*(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s*(\d{4})\b",
+        title, flags=re.I
+    )
+    if m:
+        d1, d2, mon, year = int(m.group(1)), int(m.group(2)), m.group(3), int(m.group(4))
+        start = datetime.strptime(f"{d1:02d}-{mon}-{year}", "%d-%b-%Y")
+        days = max(1, min((d2 - d1 + 1), 7))
+        out = []
+        for i in range(days):
+            d = start + timedelta(days=i)
+            out.append(f"{d.strftime('%A')} {d.strftime('%d-%m-%Y')}")
+        return out
+
+    return []
+
+
+def _period_fingerprint(page) -> str:
+    """
+    Robust fallback for detecting a period change when we can't parse the title.
+    Based on the visible weekday header labels (often include explicit dates).
+    """
+    try:
+        tbl = _find_timesheet_table(page)
+        if not tbl or not tbl.count():
+            return ""
+        day_cols = _get_weekday_headers(tbl)
+        if not day_cols:
+            return ""
+        labels = [label for _, label in day_cols]
+        labels = [" ".join((label or "").split()) for label in labels]  # normalize whitespace
+        return " | ".join(labels)
+    except Exception:
+        return ""
 
 
 def _saw_saved_toast(page) -> bool:
@@ -130,710 +262,901 @@ def _saw_saved_toast(page) -> bool:
         return True
     return False
 
-
-def _wait_for_save_confirmation(page, *, prev_chip: str, timeout_s: float = 12.0) -> bool:
-    """
-    Accept success if:
-      - a “Saved” toast appears, OR
-      - the chip changes away from 'Not created' to Open/Draft/Approval pending/Submitted.
-    """
-    if _saw_saved_toast(page):
-        return True
-
-    end = time.time() + timeout_s
-    prev = (prev_chip or "").strip().lower()
-    while time.time() < end:
-        now = (_get_status_chip_text(page) or "").strip().lower()
-        if now and now != "not created":
-            if prev == "not created":
-                return True
-            if prev in ("open", "draft") and now in (
-                "open", "draft", "approval pending", "submitted"
-            ):
-                return True
-            if now != prev:
-                return True
-        time.sleep(0.15)
-    return False
-
-
-def _wait_for_timesheet_ready(page, timeout_ms: int) -> Optional[str]:
-    """
-    Wait until a key action button is visible.
-    Returns: "create", "save", "submit", or None if neither is present (locked/submitted view or transient).
-    """
-    end = time.time() + (timeout_ms / 1000.0)
-    while time.time() < end:
-        # Create
-        with suppress_exc():
-            loc = page.get_by_role("button", name="Create timesheet")
-            if loc.count() and loc.is_visible():
-                return "create"
-        with suppress_exc():
-            loc = page.get_by_role("button", name="Create")
-            if loc.count() and loc.is_visible():
-                return "create"
-        with suppress_exc():
-            if page.locator('button:has-text("Create timesheet")').is_visible():
-                return "create"
-        with suppress_exc():
-            if page.locator('button:has-text("Create")').is_visible():
-                return "create"
-
-        # Submit
-        with suppress_exc():
-            loc = page.get_by_role("button", name="Submit for approval")
-            if loc.count() and loc.is_visible():
-                return "submit"
-        with suppress_exc():
-            if page.locator('button:has-text("Submit for approval")').is_visible():
-                return "submit"
-
-        # Save
-        with suppress_exc():
-            loc = page.get_by_role("button", name="Save")
-            if loc.count() and loc.is_visible():
-                return "save"
-        with suppress_exc():
-            if page.locator('button:has-text("Save")').is_visible():
-                return "save"
-        with suppress_exc():
-            if page.locator(f"xpath={SAVE_BTN_XPATH}").is_visible():
-                return "save"
-
-        time.sleep(0.10)
-    return None
-
-
-def _click_create(page) -> bool:
-    """Click 'Create timesheet' / 'Create' with multiple fallbacks."""
-    for make in (
-        lambda: page.get_by_role("button", name="Create timesheet"),
-        lambda: page.get_by_role("button", name="Create"),
-        lambda: page.locator('button:has-text("Create timesheet")'),
-        lambda: page.locator('button:has-text("Create")'),
-        lambda: page.locator(f"xpath={CREATE_TIMESHEET_XPATH}"),
-        lambda: page.locator(f"xpath={CREATE_BTN_XPATH}"),
-    ):
-        with suppress_exc():
-            btn = make().first
-            if btn.count():
-                with suppress_exc():
-                    btn.scroll_into_view_if_needed()
-                btn.click(timeout=SHORT_TIMEOUT_MS)
-                time.sleep(0.4)
-                return True
-    return False
-
-
-def _click_save(page) -> bool:
-    """Click Save with fallbacks: role → has-text → XPath → force."""
-    with suppress_exc():
-        page.get_by_role("button", name="Save").click(timeout=SHORT_TIMEOUT_MS)
-        return True
-    with suppress_exc():
-        page.locator('button:has-text("Save")').click(timeout=SHORT_TIMEOUT_MS)
-        return True
-    with suppress_exc():
-        page.click(f"xpath={SAVE_BTN_XPATH}", timeout=SHORT_TIMEOUT_MS)
-        return True
-    with suppress_exc():
-        page.get_by_role("button", name="Save").click(timeout=SHORT_TIMEOUT_MS, force=True)
-        return True
-    return False
-
-
-def _click_submit(page) -> bool:
-    """Click 'Submit for approval' (+ confirm dialog variant)."""
-    strategies = [
-        lambda: page.get_by_role("button", name="Submit for approval"),
-        lambda: page.locator('button:has-text("Submit for approval")'),
-        lambda: page.locator('//button[contains(normalize-space(.), "Submit for approval")]'),
-    ]
-    for make in strategies:
-        with suppress_exc():
-            loc = make().first
-            loc.wait_for(state="visible", timeout=SHORT_TIMEOUT_MS)
-            with suppress_exc():
-                loc.scroll_into_view_if_needed()
-            loc.click(timeout=SHORT_TIMEOUT_MS)
-            # optional confirm dialog
-            with suppress_exc():
-                page.get_by_role("button", name="Submit").click(timeout=2_000)
-            return True
-    return False
-
-
 def _has_submit_button(page) -> bool:
     with suppress_exc():
-        loc = page.get_by_role("button", name="Submit for approval")
-        if loc.count() and loc.is_visible():
+        if page.get_by_role("button", name=re.compile(r"Submit for approval", re.I)).count():
             return True
     with suppress_exc():
-        if page.locator('button:has-text("Submit for approval")').is_visible():
-            return True
-    with suppress_exc():
-        if page.locator('//button[contains(normalize-space(.), "Submit for approval")]').is_visible():
+        if page.locator("xpath=" + SAVE_BTN_XPATH.replace("button","button[contains(.,'Submit')]")).count():
             return True
     return False
 
+def _click_save(page) -> bool:
+    with suppress_exc():
+        btn = page.get_by_role("button", name=re.compile(r"^Save$", re.I)).first
+        if btn.count():
+            btn.click(timeout=SHORT_TIMEOUT_MS)
+            return True
+    with suppress_exc():
+        btn = page.locator("xpath=" + SAVE_BTN_XPATH).first
+        if btn.count():
+            btn.click(timeout=SHORT_TIMEOUT_MS)
+            return True
+    return False
 
-def _get_week_title(page) -> str:
-    """Grab the 'Wxx from dd-mm-yyyy to dd-mm-yyyy' chunk if present; else empty."""
-    try:
-        loc = page.locator("text=/^W\\d{1,2}\\s+from\\s+\\d{2}-\\d{2}-\\d{4}/i").first
-        if loc.count():
-            return (loc.inner_text() or "").strip()
-    except Exception:
-        pass
-    try:
-        header = page.locator("main, body").first.inner_text(timeout=2000)
-        import re
-        m = re.search(r"W\d{1,2}\s+from\s+\d{2}-\d{2}-\d{4}", header or "", re.I)
-        if m:
-            return m.group(0)
-    except Exception:
-        pass
-    return ""
+def _click_submit(page) -> bool:
+    with suppress_exc():
+        btn = page.get_by_role("button", name=re.compile(r"Submit for approval", re.I)).first
+        if btn.count():
+            btn.click(timeout=SHORT_TIMEOUT_MS)
+            return True
+    return False
 
+def _click_create(page) -> bool:
+    with suppress_exc():
+        b = page.locator("xpath=" + CREATE_TIMESHEET_XPATH).first
+        if b.count():
+            b.click(timeout=SHORT_TIMEOUT_MS)
+            return True
+    with suppress_exc():
+        b = page.locator("xpath=" + CREATE_BTN_XPATH).first
+        if b.count():
+            b.click(timeout=SHORT_TIMEOUT_MS)
+            return True
+    return False
 
-def _go_to_next_week(page) -> bool:
-    """Click the right-arrow 'next week' control and wait for the week title to change."""
-    before = _get_week_title(page)
-    clicked = False
-    for try_click in (
-        lambda: page.locator(NEXT_WEEK_CY).first.click(timeout=SHORT_TIMEOUT_MS),
-        lambda: page.locator('button:has(i.arrow.right)').first.click(timeout=SHORT_TIMEOUT_MS),
-        lambda: page.locator(f"xpath={NEXT_WEEK_BTN_XPATH}").first.click(timeout=SHORT_TIMEOUT_MS),
-    ):
-        with suppress_exc():
-            try_click()
-            clicked = True
-            break
-    if not clicked:
-        return False
-
-    end = time.time() + 8.0
+def _wait_for_save_submit_chip(page, timeout_ms: int) -> Optional[str]:
+    end = time.time() + (timeout_ms / 1000.0)
     while time.time() < end:
-        after = _get_week_title(page)
-        if after and after != before:
-            return True
+        with suppress_exc():
+            if page.get_by_role("button", name=re.compile(r"Create timesheet", re.I)).count():
+                return "create"
+        with suppress_exc():
+            if page.get_by_role("button", name=re.compile(r"^Save$", re.I)).count():
+                return "save"
+        with suppress_exc():
+            if page.get_by_role("button", name=re.compile(r"Submit for approval", re.I)).count():
+                return "submit"
+        chip = (_get_status_chip_text(page) or "").lower().strip()
+        if chip.startswith(("approval pending", "submitted")):
+            return None
         time.sleep(0.15)
-    return False
+    return None
+
+# ────────────────────────── Table / grid view helpers ─────────────────────────
+
+def _pretty_labels(day_cols):
+        """Normalize labels like 'Monday03-11-2025' -> 'Monday 03-11-2025'."""
+        out = []
+        for _, lbl in day_cols:
+            s = " ".join((lbl or "").strip().split())
+            m = re.match(r'^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\s*(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})$',
+                        s, flags=re.I)
+            if m:
+                s = f"{m.group(1).title()} {m.group(2)}"
+            out.append(s)
+        return out
+
+def _find_timesheet_table(page):
+    ci = "translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')"
+    weekdays = ("monday","tuesday","wednesday","thursday","friday")
+    parts = " or ".join([f"contains({ci}, '{d}')" for d in weekdays])
+
+    # A) HTML table with weekday headers
+    loc = page.locator(f"xpath=//table[.//th[{parts}] or .//*[@role='columnheader'][{parts}]]").first
+    if loc.count(): return loc
+
+    # B) ARIA grid (React/AG-Grid) with weekday headers
+    grid = page.locator("xpath=//*[@role='grid' or @role='table']").filter(
+        has=page.locator(f"xpath=.//*[@role='columnheader'][{parts}] | .//*[self::th or self::div][{parts}]")
+    ).first
+    if grid.count(): return grid
+
+    # C) Fallback: first table/grid under main
+    loc = page.locator("main").locator("table, [role='grid'], [role='table']").first
+    if loc.count(): return loc
+
+    # D) Near headings
+    return page.locator("xpath=(//h1[contains(., 'Timesheet')]/following::*[self::table or @role='grid'])[1]").first
+
+def _get_weekday_headers(tbl_or_page):
+    """
+    Return [(col_index, label)].
+    Strategy:
+      1) Try native table <thead><th>…> parsing (textContent).
+      2) Try ARIA grid columnheaders.
+      3) Try generic DIV-based header strip.
+      4) If all else fails AND we can parse the title on the page, synthesize labels.
+    """
+    def _dedupe_keep_order(pairs):
+        seen = set()
+        out = []
+        for idx, lbl in pairs:
+            key = " ".join((lbl or "").split())
+            if key and key not in seen:
+                seen.add(key)
+                out.append((idx, key))
+        return out
+
+    headers = []
+
+    # 1) Native table header
+    try:
+        tbl = tbl_or_page
+        if hasattr(tbl_or_page, "locator"):
+            # If page, try to find the table first
+            maybe_tbl = _find_timesheet_table(tbl_or_page)
+            if maybe_tbl and maybe_tbl.count():
+                tbl = maybe_tbl
+        ths = tbl.locator("thead th")
+        if ths.count():
+            day_re = re.compile(
+                r"(MONDAY|TUESDAY|WEDNESDAY|THURSDAY|FRIDAY|SATURDAY|SUNDAY)\b(?:.*?\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}))?",
+                re.I,
+            )
+            for i in range(ths.count()):
+                txt = ""
+                with suppress_exc():
+                    txt = (ths.nth(i).evaluate("el => el.textContent") or "").strip()
+                if not txt:
+                    with suppress_exc():
+                        txt = (ths.nth(i).inner_text() or "").strip()
+                txt = " ".join(txt.split())
+                m = day_re.search(txt)
+                if m:
+                    day = m.group(1).title()
+                    date = m.group(2)
+                    headers.append((i, f"{day} {date}" if date else day))
+            headers = _dedupe_keep_order(headers)
+            if headers:
+                return headers
+    except Exception:
+        pass
+
+    # 2) ARIA grid header
+    try:
+        tbl = tbl_or_page if not headers else tbl
+        if hasattr(tbl, "locator"):
+            cols = tbl.locator('[role="columnheader"]')
+            if cols.count():
+                day_names = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
+                for i in range(cols.count()):
+                    txt = ""
+                    with suppress_exc():
+                        txt = (cols.nth(i).evaluate("el => el.textContent") or "").strip()
+                    if not txt:
+                        with suppress_exc():
+                            txt = (cols.nth(i).inner_text() or "").strip()
+                    low = (txt or "").lower()
+                    for dn in day_names:
+                        if dn.lower() in low:
+                            headers.append((i, " ".join((txt or dn).split())))
+                            break
+                headers = _dedupe_keep_order(headers)
+                if headers:
+                    return headers
+    except Exception:
+        pass
+
+    # 3) Generic DIV-based header strip (very loose)
+    try:
+        tbl = _find_timesheet_table(tbl_or_page)
+        if tbl and tbl.count():
+            day_names = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
+            ci = "translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')"
+            day_xpath = " or ".join([f"contains({ci}, '{dn.lower()}')" for dn in day_names])
+            generic = tbl.locator(f"xpath=.//*[self::div or self::span or self::p][{day_xpath}]")
+            if generic.count():
+                for i in range(generic.count()):
+                    txt = ""
+                    with suppress_exc():
+                        txt = (generic.nth(i).evaluate('el => el.textContent') or '').strip()
+                    if not txt:
+                        with suppress_exc():
+                            txt = (generic.nth(i).inner_text() or '').strip()
+                    txt = " ".join((txt or "").split())
+                    if txt:
+                        headers.append((i, txt))
+                headers = _dedupe_keep_order(headers)[:7]
+                if headers:
+                    return headers
+    except Exception:
+        pass
+
+    # 4) Synthesize from title on page (assume project column is 0, days are 1..N)
+    try:
+        title = _get_week_title(tbl_or_page)
+        labels = _labels_from_title(title)
+        if labels:
+            return list(enumerate(labels, start=1))
+    except Exception:
+        pass
+
+    return []
+
+def _verbatim_grid(tbl, day_cols):
+    """Read rows for native tables and ARIA grids, aligned to weekday count, ignoring frozen dup & totals."""
+    rows = []
+
+    # number of weekday columns we want to render (Mon..Fri or Mon..Sun)
+    day_count = max(0, len(day_cols))
+
+    def _txt(loc):
+        s = ""
+        with suppress_exc():
+            s = (loc.evaluate("el => el.textContent") or "").strip()
+        if not s:
+            with suppress_exc():
+                s = (loc.inner_text() or "").strip()
+        return " ".join((s or "").split())
+
+    # Helper: post-process the values scraped after the project column
+    def _sanitize_values(values, proj):
+        # 1) Some layouts repeat the frozen "project" column again as the first value
+        while values and values[0]:
+            v0 = values[0].strip()
+            if not v0:
+                break
+            # If the first value equals (or starts with) the project text, drop it
+            if v0 == proj or v0.lower().startswith(proj.lower()[:16]):
+                values.pop(0)
+                continue
+            break
+
+        # 2) If there's exactly one extra trailing cell (weekly total), drop it
+        if len(values) == day_count + 1:
+            values = values[:day_count]
+
+        # 3) Clip/pad to the expected weekday count
+        if len(values) > day_count:
+            values = values[:day_count]
+        elif len(values) < day_count:
+            values = values + [""] * (day_count - len(values))
+        return values
+
+    # ───────── Native <table> ─────────
+    body_rows = tbl.locator("tbody tr")
+    if body_rows.count():
+        for rix in range(body_rows.count()):
+            r = body_rows.nth(rix)
+            tds = r.locator("td")
+            if not tds.count():
+                continue
+
+            # Project: first column
+            proj = _txt(tds.nth(0))
+            if not proj:
+                with suppress_exc():
+                    p0 = tds.nth(0).locator("p, div, span").first
+                    if p0.count():
+                        proj = _txt(p0)
+            if not proj:
+                continue
+
+            # Day cells: everything after the first column, in DOM order
+            values = [_txt(tds.nth(i)) for i in range(1, tds.count())]
+            values = _sanitize_values(values, proj)
+            rows.append((proj, values))
+        return rows
+
+    # ───────── ARIA grid ─────────
+    aria_rows = tbl.locator('[role="rowgroup"] [role="row"]')
+    if not aria_rows.count():
+        aria_rows = tbl.locator('[role="row"]')  # broad fallback
+
+    for rix in range(aria_rows.count()):
+        r = aria_rows.nth(rix)
+        cells = r.locator('[role="gridcell"], [role="cell"]')
+        if not cells.count():
+            continue
+
+        # Project: first cell
+        proj = _txt(cells.nth(0))
+        if not proj:
+            continue
+
+        # Day cells: everything after the first cell, in order
+        values = [_txt(cells.nth(i)) for i in range(1, cells.count())]
+        values = _sanitize_values(values, proj)
+        rows.append((proj, values))
+
+    return rows
 
 
-# ---------- main client ----------
+def _read_flex_grid(tbl, day_cols):
+    """
+    Fallback reader for DIV-based layouts (no <table>, no ARIA roles).
+    Heuristic: treat each immediate child (or obvious row container) as a row,
+    first child as "Project", subsequent children as day cells.
+    """
+    rows = []
+
+    # likely row containers
+    candidates = tbl.locator(
+        "xpath=.//*[contains(@class,'row') or contains(@class,'Row') or contains(@class,'timesheet') or contains(@class,'TableRow')]"
+    )
+    if not candidates.count():
+        # fallback: direct children
+        candidates = tbl.locator(":scope > *")
+
+    for i in range(min(100, candidates.count())):
+        r = candidates.nth(i)
+        # collect direct children as columns
+        cells = r.locator(":scope > *")
+        if cells.count() < 2:
+            continue
+        # project name
+        proj = ""
+        with suppress_exc():
+            proj = (cells.nth(0).evaluate("el => el.textContent") or "").strip()
+        if not proj:
+            with suppress_exc():
+                proj = (cells.nth(0).inner_text() or "").strip()
+        proj = " ".join((proj or "").split())
+        if not proj:
+            continue
+
+        # day cells – map by index count from headers
+        out = []
+        for j, _ in day_cols:
+            if j+1 >= cells.count():
+                out.append("")
+                continue
+            txt = ""
+            with suppress_exc():
+                txt = (cells.nth(j+1).evaluate("el => el.textContent") or "").strip()
+            if not txt:
+                with suppress_exc():
+                    txt = (cells.nth(j+1).inner_text() or "").strip()
+            out.append(" ".join((txt or "").split()))
+        rows.append((proj, out))
+
+    return rows
+
+
+# ────────────────────────────── Napta Client (API) ───────────────────────────
 
 class NaptaClient:
+    """Fast client: login once (headed) → save storage_state → close browser.
+       Subsequent commands run headless in a single browser with storage_state loaded.
     """
-    Playwright work is executed in a background thread (prevents SyncAPI-in-asyncio crash).
-    """
-
     def __init__(self) -> None:
-        self._cookie_ok: Optional[bool] = None  # for status text
+        self._cookie_ok: Optional[bool] = None
+        self._p = None
+        self._browser = None
+        self._ctx = None
+        self._page = None
+        self._view_cache_path = _APP_DIR / "view_cache.json"
 
-    # ---------- public API (threaded wrappers) ----------
+    # ───── Public API (synchronous) ─────
 
     def status(self) -> str:
         if STATE_PATH.exists():
-            return "Auth: will use saved session (storage state or browser SSO cookies)."
-        if self._cookie_ok is None:
-            return "Auth: will use saved session (storage state or browser SSO cookies)."
-        return "Auth: OK (session present)." if self._cookie_ok else \
-               "Auth: missing/expired cookies. Please login to Napta once in your browser or run `login`."
-
-    def save_current_week(self) -> Tuple[bool, str]:
-        return self._run_in_worker(self._save_current_week_sync)
-
-    def save_next_week(self) -> Tuple[bool, str]:
-        return self._run_in_worker(self._save_next_week_sync)
-
-    def submit_current_week(self) -> Tuple[bool, str]:
-        return self._run_in_worker(self._submit_current_week_sync)
-
-    def submit_next_week(self) -> Tuple[bool, str]:
-        return self._run_in_worker(self._submit_next_week_sync)
-
-    def save_and_submit_current_week(self) -> Tuple[bool, str]:
-        # Single-session fast path
-        return self._run_in_worker(self._save_and_submit_current_week_sync)
+            return "Auth: will use saved session (storage state)."
+        if self._cookie_ok:
+            return "Auth: OK (session present)."
+        return "Auth: will use saved session (storage state or browser SSO cookies)."
 
     def login(self) -> Tuple[bool, str]:
-        """Headful login and capture storage_state to STATE_PATH."""
-        return self._run_in_worker(self._login_sync)
+        return self._login_sync()
 
-    # ---------- worker-thread runner ----------
+    def view_week(self, which: str = "current") -> Tuple[bool, str]:
+        return self._view_week_fast(which)
 
-    def _run_in_worker(self, fn):
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            fut = pool.submit(fn)
-            return fut.result()
+    def save_current_week(self) -> Tuple[bool, str]:
+        return self._save_current_week_fast()
 
-    # ---------- building context ----------
+    def save_next_week(self) -> Tuple[bool, str]:
+        return self._save_next_week_fast()
 
-    def _build_context(self, p, *, headless: bool):
-        browser = p.chromium.launch(headless=headless, args=["--disable-dev-shm-usage"])
+    def submit_current_week(self) -> Tuple[bool, str]:
+        return self._submit_current_week_fast()
+
+    def submit_next_week(self) -> Tuple[bool, str]:
+        return self._submit_next_week_fast()
+
+    def save_and_submit_current_week(self) -> Tuple[bool, str]:
+        ok, msg = self._save_current_week_fast()
+        if not ok:
+            return ok, msg
+        return self._submit_current_week_fast()
+
+    # ────────────────── Playwright lifecycle ──────────────────
+
+    def _ensure_session(self, *, headless: bool = True):
+        """Create ONE headless browser for the chat session, using saved storage_state if present."""
+        if headless and self._p and self._browser and self._ctx and self._page:
+            return
+
+        self._p = sync_playwright().start()
+        self._browser = self._p.chromium.launch(
+            headless=headless,
+            proxy=_proxy_conf(),
+            args=["--disable-dev-shm-usage"],
+        )
+        # Use storage_state when available (avoid re-login)
         if STATE_PATH.exists():
-            ctx = browser.new_context(
-                storage_state=str(STATE_PATH),
-                user_agent=UA_DESKTOP,
-                viewport={"width": 1400, "height": 900},
-            )
-            self._cookie_ok = True
+            self._ctx = self._browser.new_context(storage_state=str(STATE_PATH))
         else:
-            ctx = browser.new_context(
-                user_agent=UA_DESKTOP,
-                viewport={"width": 1400, "height": 900},
-            )
-            ctx.set_default_timeout(DEFAULT_TIMEOUT_MS)
-            ctx.route("**/*", _route_slim)
-            if not self._load_cookies_from_cache(ctx):
-                self._load_cookies_from_keychain_and_cache(ctx)
-            self._cookie_ok = True
+            self._ctx = self._browser.new_context()
 
-        with suppress_exc():
-            ctx.route("**/*", _route_slim)
-        ctx.set_default_timeout(DEFAULT_TIMEOUT_MS)
-        return browser, ctx
+        self._ctx.set_default_timeout(DEFAULT_TIMEOUT_MS)
+        self._ctx.route("**/*", _route_slim)
+        self._page = self._ctx.new_page()
 
-    # ---------- cookie helpers ----------
-
-    def _load_cookies_from_cache(self, ctx) -> bool:
-        if not _COOKIE_CACHE.exists():
-            return False
         try:
-            data = json.loads(_COOKIE_CACHE.read_text())
+            self._page.add_init_script(f"Object.defineProperty(navigator, 'userAgent', {{get: () => '{UA_DESKTOP}'}});")
         except Exception:
-            return False
-        now = time.time()
-        keep: list[dict] = []
-        for c in data:
-            exp = c.get("expires", None)
-            if exp in (None, 0) or exp > now:
-                keep.append(c)
-        if not keep:
-            return False
-        batch: list[dict] = []
-        for ck in keep:
-            batch.append(ck)
-            if len(batch) >= 100:
-                ctx.add_cookies(batch)
-                batch = []
-        if batch:
-            ctx.add_cookies(batch)
-        return True
+            pass
 
-    def _load_cookies_from_keychain_and_cache(self, ctx) -> None:
-        cj = browser_cookie3.chrome(domain_name=".napta.io")
-        cookies = []
-        now = time.time()
-        for c in cj:
-            if "napta.io" not in c.domain:
-                continue
-            exp = getattr(c, "expires", None)
-            if exp not in (None, 0) and exp < now:
-                continue
-            cookies.append({
-                "name": c.name,
-                "value": c.value,
-                "domain": c.domain,
-                "path": c.path or "/",
-                "secure": bool(getattr(c, "secure", False)),
-                "httpOnly": bool(getattr(getattr(c, "_rest", {}), "get", lambda *_: False)("httponly")),
-                **({"expires": int(exp)} if exp not in (None, 0) else {}),
-            })
-        if not cookies:
-            raise NaptaAuthError("No Napta cookies found. Open https://app.napta.io in Chrome and sign in.")
-
-        batch: list[dict] = []
-        for ck in cookies:
-            batch.append(ck)
-            if len(batch) >= 100:
-                ctx.add_cookies(batch)
-                batch = []
-        if batch:
-            ctx.add_cookies(batch)
-
+    def _shutdown(self):
         with suppress_exc():
-            _COOKIE_CACHE.write_text(json.dumps(cookies, indent=2))
+            if self._ctx: self._ctx.close()
+        with suppress_exc():
+            if self._browser: self._browser.close()
+        with suppress_exc():
+            if self._p: self._p.stop()
+        self._p = self._browser = self._ctx = self._page = None
 
-    # ---------- page helpers ----------
+    def close(self):
+        self._shutdown()
 
-    def _on_login_page(self, page) -> bool:
+    # ────────────────── Auth helpers ──────────────────
+
+    def _open_timesheet(self):
+        last_err = None
+        for attempt in range(2):
+            try:
+                self._page.goto(DEFAULT_APP_URL, timeout=45_000)
+                with suppress_exc(): self._page.wait_for_load_state("domcontentloaded", timeout=3_000)
+                with suppress_exc(): self._page.keyboard.press("Escape")
+                with suppress_exc(): self._page.get_by_role("button", name="This week").click(timeout=1_200)
+                with suppress_exc(): self._page.locator(f"xpath={THIS_WEEK_BTN_XPATH}").first.click(timeout=1_200)
+                return
+            except Exception as e:
+                last_err = e
+                time.sleep(0.6)
+        raise last_err if last_err else RuntimeError("Failed to open timesheet")
+
+    # ─────────────────────────────── Login ───────────────────────────────
+
+    def _on_login_page(self) -> bool:
         with suppress_exc():
-            if page.locator('input[type="email"]').count():
-                return True
+            if self._page.locator('input[type="email"]').count(): return True
         with suppress_exc():
-            if page.get_by_role("button", name="Continue with Google").count():
-                return True
+            if self._page.get_by_role("button", name="Continue with Google").count(): return True
         with suppress_exc():
-            if page.locator("text=Welcome").count() and page.locator("text=Log in to continue").count():
-                return True
+            if self._page.locator("text=Welcome").count() and self._page.locator("text=Log in to continue").count(): return True
         return False
 
-    def _open_timesheet(self, page):
-        page.goto(DEFAULT_APP_URL, wait_until="domcontentloaded", timeout=12_000)
-        with suppress_exc():
-            page.keyboard.press("Escape")
-        # Best-effort “This week”
-        with suppress_exc():
-            page.get_by_role("button", name="This week").click(timeout=1_200)
-        with suppress_exc():
-            page.locator(f"xpath={THIS_WEEK_BTN_XPATH}").first.click(timeout=1_200)
-
-    # ---------- operations (run inside worker) ----------
-
-    def _save_current_week_sync(self) -> Tuple[bool, str]:
-        p = sync_playwright().start()
-        browser = None
-        try:
-            browser, ctx = self._build_context(p, headless=True)
-            page = ctx.new_page()
-            self._open_timesheet(page)
-
-            chip = (_get_status_chip_text(page) or "").strip().lower()
-            if chip.startswith(("approval pending", "submitted")):
-                return True, "ℹ️ Timesheet already submitted for this week (Approval pending)."
-
-            if self._on_login_page(page):
-                name = f"napta_login_required_{ts()}.png"
-                page.screenshot(path=name, full_page=True)
-                return False, f"⛔ Napta login required. Login required. Please open Napta once in Chrome. Screenshot -> {name}"
-
-            state = _wait_for_timesheet_ready(page, timeout_ms=SHORT_TIMEOUT_MS)
-            if state is None:
-                return True, "ℹ️ Timesheet already submitted for this week (Approval pending)."
-
-            if state == "create":
-                if not _click_create(page):
-                    name = f"napta_create_failure_{ts()}.png"
-                    page.screenshot(path=name, full_page=True)
-                    return False, f"❌ Could not click 'Create timesheet'. Screenshot -> {name}"
-                state = _wait_for_timesheet_ready(page, timeout_ms=SHORT_TIMEOUT_MS)
-                if state is None:
-                    name = f"napta_create_post_state_{ts()}.png"
-                    page.screenshot(path=name, full_page=True)
-                    return False, "❌ After 'Create', no Save/Submit visible."
-
-            if state == "submit":
-                return True, "✅ Timesheet already saved. 'Submit for approval' is visible."
-
-            if not _click_save(page):
-                name = f"napta_save_failure_{ts()}.png"
-                page.screenshot(path=name, full_page=True)
-                return False, f"❌ Could not click 'Save'. Screenshot -> {name}"
-
-            _saw_saved_toast(page)
-            return True, "✅ Saved (draft)."
-        except NaptaAuthError as e:
-            return False, f"⛔ Napta login required. {e}"
-        finally:
-            with suppress_exc():
-                if browser:
-                    browser.close()
-            p.stop()
-
-    def _save_next_week_sync(self) -> Tuple[bool, str]:
-        p = sync_playwright().start()
-        browser = None
-        try:
-            browser, ctx = self._build_context(p, headless=True)
-            page = ctx.new_page()
-            self._open_timesheet(page)
-
-            if self._on_login_page(page):
-                name = f"napta_login_required_{ts()}.png"
-                page.screenshot(path=name, full_page=True)
-                return False, f"⛔ Napta login required. Login required. Please open Napta once in Chrome. Screenshot -> {name}"
-
-            before = _get_week_title(page)
-            if not _go_to_next_week(page):
-                name = f"napta_error_{ts()}.png"
-                page.screenshot(path=name, full_page=True)
-                return False, f"❌ Could not navigate to next week. Screenshot -> {name}"
-            after = _get_week_title(page)
-            if not after or after == before:
-                name = f"napta_nav_verify_{ts()}.png"
-                page.screenshot(path=name, full_page=True)
-                return False, f"❌ Navigation didn't land on next week. Screenshot -> {name}"
-
-            chip_before = (_get_status_chip_text(page) or "").strip().lower()
-            state = _wait_for_timesheet_ready(page, timeout_ms=SHORT_TIMEOUT_MS)
-            if state is None and _has_submit_button(page):
-                # Submit is visible ⇒ it's already saved/open
-                return True, "✅ Next week saved. Do you want to 'Submit for approval'? Type sbnw"
-            if state is None:
-                # Truly neither visible → likely submitted/locked
-                chip = (_get_status_chip_text(page) or "").strip().lower()
-                if chip.startswith(("approval pending", "submitted")):
-                    return True, "ℹ️ Next week already submitted (Approval pending)."
-                # transient: treat as already saved
-                return True, "✅ Next week already saved. 'Submit for approval' may be visible."
-
-            if state == "create":
-                if not _click_create(page):
-                    name = f"napta_create_failure_{ts()}.png"
-                    page.screenshot(path=name, full_page=True)
-                    return False, f"❌ Could not click 'Create timesheet' on next week. Screenshot -> {name}"
-                state = _wait_for_timesheet_ready(page, timeout_ms=SHORT_TIMEOUT_MS)
-
-            if state == "submit":
-                return True, "✅ Next week saved. Do you want to 'Submit for approval'? Type sbnw"
-
-            if state == "save":
-                if not _click_save(page):
-                    name = f"napta_save_failure_{ts()}.png"
-                    page.screenshot(path=name, full_page=True)
-                    return False, f"❌ Could not click 'Save' on next week. Screenshot -> {name}"
-
-                if not _wait_for_save_confirmation(page, prev_chip=chip_before, timeout_s=12):
-                    name = f"napta_save_verify_fail_{ts()}.png"
-                    page.screenshot(path=name, full_page=True)
-                    return False, f"❌ Save didn’t stick for next week (chip stayed “{chip_before or 'unknown'}”). Screenshot -> {name}"
-
-                return True, "✅ Saved next week (draft)."
-
-            return False, "❌ Unexpected state while saving next week."
-        except NaptaAuthError as e:
-            return False, f"⛔ Napta login required. {e}"
-        finally:
-            with suppress_exc():
-                if browser:
-                    browser.close()
-            p.stop()
-
-    def _submit_current_week_sync(self) -> Tuple[bool, str]:
-        p = sync_playwright().start()
-        browser = None
-        try:
-            browser, ctx = self._build_context(p, headless=True)
-            page = ctx.new_page()
-            self._open_timesheet(page)
-
-            chip = (_get_status_chip_text(page) or "").strip().lower()
-            if chip.startswith(("approval pending", "submitted")):
-                return True, "ℹ️ Timesheet already submitted for this week (Approval pending)."
-
-            if self._on_login_page(page):
-                name = f"napta_login_required_{ts()}.png"
-                page.screenshot(path=name, full_page=True)
-                return False, f"⛔ Napta login required. Login required. Please open Napta once in Chrome. Screenshot -> {name}"
-
-            state = _wait_for_timesheet_ready(page, timeout_ms=SHORT_TIMEOUT_MS)
-            if state is None and _has_submit_button(page):
-                state = "submit"
-            elif state is None:
-                return True, "ℹ️ Timesheet already submitted for this week (Approval pending)."
-
-            if state in ("create", "save"):
-                if state == "create":
-                    if not _click_create(page):
-                        name = f"napta_create_failure_{ts()}.png"
-                        page.screenshot(path=name, full_page=True)
-                        return False, f"❌ Could not click 'Create timesheet'. Screenshot -> {name}"
-                    state = _wait_for_timesheet_ready(page, timeout_ms=SHORT_TIMEOUT_MS)
-                if state == "save":
-                    if not _click_save(page):
-                        name = f"napta_save_failure_{ts()}.png"
-                        page.screenshot(path=name, full_page=True)
-                        return False, f"❌ Could not click 'Save'. Screenshot -> {name}"
-                    _saw_saved_toast(page)
-                    state = _wait_for_timesheet_ready(page, timeout_ms=SHORT_TIMEOUT_MS)
-
-            if not _click_submit(page):
-                name = f"napta_submit_failure_{ts()}.png"
-                page.screenshot(path=name, full_page=True)
-                return False, f"❌ Could not click 'Submit for approval'. Screenshot -> {name}"
-
-            with suppress_exc():
-                if page.locator("text=Approval pending").count():
-                    return True, "✅ Submitted for approval."
-            return True, "✅ Submit clicked."
-        except NaptaAuthError as e:
-            return False, f"⛔ Napta login required. {e}"
-        finally:
-            with suppress_exc():
-                if browser:
-                    browser.close()
-            p.stop()
-
-    def _submit_next_week_sync(self) -> Tuple[bool, str]:
-        """Navigate to next week, prefer clicking 'Submit for approval' if present, else save-then-submit."""
-        p = sync_playwright().start()
-        browser = None
-        try:
-            browser, ctx = self._build_context(p, headless=True)
-            page = ctx.new_page()
-            self._open_timesheet(page)
-
-            if self._on_login_page(page):
-                name = f"napta_login_required_{ts()}.png"
-                page.screenshot(path=name, full_page=True)
-                return False, f"⛔ Napta login required. Login required. Please open Napta once in Chrome. Screenshot -> {name}"
-
-            before = _get_week_title(page)
-            if not _go_to_next_week(page):
-                name = f"napta_error_{ts()}.png"
-                page.screenshot(path=name, full_page=True)
-                return False, f"❌ Could not navigate to next week. Screenshot -> {name}"
-            after = _get_week_title(page)
-            if not after or after == before:
-                name = f"napta_nav_verify_{ts()}.png"
-                page.screenshot(path=name, full_page=True)
-                return False, f"❌ Navigation didn't land on next week. Screenshot -> {name}"
-
-            # 1) If the submit button is visible, do it immediately.
-            if _has_submit_button(page):
-                if not _click_submit(page):
-                    name = f"napta_submit_failure_{ts()}.png"
-                    page.screenshot(path=name, full_page=True)
-                    return False, f"❌ Could not click 'Submit for approval' on next week. Screenshot -> {name}"
-                with suppress_exc():
-                    if page.locator("text=Approval pending").count():
-                        return True, "✅ Submitted next week for approval."
-                return True, "✅ Submit clicked (next week)."
-
-            # 2) Otherwise, try to get into a state where submit appears: Create → Save
-            state = _wait_for_timesheet_ready(page, timeout_ms=SHORT_TIMEOUT_MS)
-
-            if state == "create":
-                if not _click_create(page):
-                    name = f"napta_create_failure_{ts()}.png"
-                    page.screenshot(path=name, full_page=True)
-                    return False, f"❌ Could not click 'Create timesheet' on next week. Screenshot -> {name}"
-                state = _wait_for_timesheet_ready(page, timeout_ms=SHORT_TIMEOUT_MS)
-
-            if state == "save":
-                prev_chip = (_get_status_chip_text(page) or "").strip().lower()
-                if not _click_save(page):
-                    name = f"napta_save_failure_{ts()}.png"
-                    page.screenshot(path=name, full_page=True)
-                    return False, f"❌ Could not click 'Save' on next week. Screenshot -> {name}"
-                if not _wait_for_save_confirmation(page, prev_chip=prev_chip, timeout_s=12):
-                    name = f"napta_save_verify_fail_{ts()}.png"
-                    page.screenshot(path=name, full_page=True)
-                    return False, f"❌ Save didn’t stick for next week (chip stayed “{prev_chip or 'unknown'}”). Screenshot -> {name}"
-
-            # 3) After saving, the submit button should be there. If not, check chip (fallback).
-            if not _has_submit_button(page):
-                chip = (_get_status_chip_text(page) or "").strip().lower()
-                if chip.startswith(("approval pending", "submitted")):
-                    return True, "ℹ️ Next week already submitted (Approval pending)."
-                name = f"napta_submit_absent_{ts()}.png"
-                page.screenshot(path=name, full_page=True)
-                return False, "❌ Submit button not visible after saving next week. Screenshot -> " + name
-
-            # 4) Click submit now.
-            if not _click_submit(page):
-                name = f"napta_submit_failure_{ts()}.png"
-                page.screenshot(path=name, full_page=True)
-                return False, f"❌ Could not click 'Submit for approval' on next week. Screenshot -> {name}"
-
-            with suppress_exc():
-                if page.locator("text=Approval pending").count():
-                    return True, "✅ Submitted next week for approval."
-            return True, "✅ Submit clicked (next week)."
-
-        except NaptaAuthError as e:
-            return False, f"⛔ Napta login required. {e}"
-        finally:
-            with suppress_exc():
-                if browser:
-                    browser.close()
-            p.stop()
-
-
-    def _save_and_submit_current_week_sync(self) -> Tuple[bool, str]:
-        """Single-session save+submit for speed."""
-        p = sync_playwright().start()
-        browser = None
-        try:
-            browser, ctx = self._build_context(p, headless=True)
-            page = ctx.new_page()
-            self._open_timesheet(page)
-
-            chip = (_get_status_chip_text(page) or "").strip().lower()
-            if chip.startswith(("approval pending", "submitted")):
-                return True, "ℹ️ Timesheet already submitted for this week (Approval pending)."
-
-            if self._on_login_page(page):
-                name = f"napta_login_required_{ts()}.png"
-                page.screenshot(path=name, full_page=True)
-                return False, f"⛔ Napta login required. Login required. Please open Napta once in Chrome. Screenshot -> {name}"
-
-            state = _wait_for_timesheet_ready(page, timeout_ms=SHORT_TIMEOUT_MS)
-            if state is None and _has_submit_button(page):
-                state = "submit"
-            elif state is None:
-                return True, "ℹ️ Timesheet already submitted for this week (Approval pending)."
-
-            if state == "create":
-                if not _click_create(page):
-                    name = f"napta_create_failure_{ts()}.png"
-                    page.screenshot(path=name, full_page=True)
-                    return False, f"❌ Could not click 'Create timesheet'. Screenshot -> {name}"
-                state = _wait_for_timesheet_ready(page, timeout_ms=SHORT_TIMEOUT_MS)
-
-            if state == "save":
-                if not _click_save(page):
-                    name = f"napta_save_failure_{ts()}.png"
-                    page.screenshot(path=name, full_page=True)
-                    return False, f"❌ Could not click 'Save'. Screenshot -> {name}"
-                _saw_saved_toast(page)
-                state = _wait_for_timesheet_ready(page, timeout_ms=SHORT_TIMEOUT_MS)
-
-            if not _click_submit(page):
-                name = f"napta_submit_failure_{ts()}.png"
-                page.screenshot(path=name, full_page=True)
-                return False, f"❌ Could not click 'Submit for approval'. Screenshot -> {name}"
-
-            with suppress_exc():
-                if page.locator("text=Approval pending").count():
-                    return True, "✅ Submitted for approval."
-            return True, "✅ Submit clicked."
-        except NaptaAuthError as e:
-            return False, f"⛔ Napta login required. {e}"
-        finally:
-            with suppress_exc():
-                if browser:
-                    browser.close()
-            p.stop()
-
     def _login_sync(self) -> Tuple[bool, str]:
-        """Headful login and capture storage_state to STATE_PATH."""
-        p = sync_playwright().start()
-        browser = None
-        try:
-            browser, ctx = self._build_context(p, headless=False)
-            page = ctx.new_page()
-            page.goto(DEFAULT_APP_URL, wait_until="domcontentloaded", timeout=30_000)
+        """
+        Headed login to capture storage_state. If an asyncio loop is running
+        (e.g. when prompt_toolkit owns the TTY), run the same logic in a
+        subprocess to avoid the 'Playwright Sync API inside asyncio loop' error.
+        """
+        import sys, subprocess, asyncio, textwrap, re, time
 
-            ready = _wait_for_timesheet_ready(page, timeout_ms=LONG_TIMEOUT_MS)
-            if ready is None and not self._on_login_page(page):
-                ctx.storage_state(path=str(STATE_PATH))
-                return True, "✅ Login captured. You can now run: save / submit."
-            if ready is None:
-                name = f"napta_login_timeout_{ts()}.png"
-                page.screenshot(path=name, full_page=True)
-                return False, f"Login window timed out. Screenshot -> {name}"
-
-            ctx.storage_state(path=str(STATE_PATH))
-            return True, "✅ Login captured. You can now run: save / submit."
-        except Exception as e:
-            return False, f"Login failed: {e!s}"
-        finally:
+        # Helper: do we already have a valid session open?
+        def _captured(ctx, page) -> bool:
             with suppress_exc():
-                if browser:
-                    browser.close()
-            p.stop()
+                if page.get_by_role("button", name=re.compile(r"Create timesheet", re.I)).count():
+                    ctx.storage_state(path=str(STATE_PATH)); return True
+            with suppress_exc():
+                if page.get_by_role("button", name=re.compile(r"^Save$", re.I)).count():
+                    ctx.storage_state(path=str(STATE_PATH)); return True
+            with suppress_exc():
+                if page.get_by_role("button", name=re.compile(r"Submit for approval", re.I)).count():
+                    ctx.storage_state(path=str(STATE_PATH)); return True
+            chip = (_get_status_chip_text(page) or "").strip()
+            if chip:
+                with suppress_exc():
+                    ctx.storage_state(path=str(STATE_PATH))
+                return True
+            return False
 
-    # ---------- CLI compatibility ----------
+        # Path 1: normal (no running event loop) — keep your original logic
+        try:
+            asyncio.get_running_loop()
+            loop_running = True
+        except RuntimeError:
+            loop_running = False
 
-    def preview_week(self, iso_week: str, *, leave_details=None):
-        return True, "(preview) Using current week; nothing to preview.", None
+        if not loop_running:
+            from playwright.sync_api import sync_playwright as _sp  # original import path
+            with _sp() as p:
+                browser = p.chromium.launch(
+                    headless=False,
+                    proxy=_proxy_conf(),
+                    args=["--disable-dev-shm-usage"],
+                )
+                ctx = browser.new_context()
+                ctx.set_default_timeout(DEFAULT_TIMEOUT_MS)
+                ctx.route("**/*", _route_slim)
+                page = ctx.new_page()
+                try:
+                    try:
+                        page.goto(DEFAULT_APP_URL, timeout=45_000)
+                    except Exception:
+                        with suppress_exc():
+                            page.goto("https://app.napta.io", timeout=45_000)
+                            page.goto(DEFAULT_APP_URL, timeout=45_000)
 
-    def save_week(self, iso_week: str, *, leave_details=None):
-        return self.save_current_week()
+                    # Wait for user to complete SSO (up to 3 minutes)
+                    start = time.time()
+                    while time.time() - start < 180:
+                        if _captured(ctx, page):
+                            self._cookie_ok = True
+                            return True, "✅ Login captured. You can now run: view / save / submit."
+                        time.sleep(0.5)
 
-    def submit_week(self, iso_week: str):
-        return self.submit_current_week()
+                    # timed out
+                    name = f"napta_login_timeout_{ts()}.png"
+                    with suppress_exc():
+                        page.screenshot(path=_shot(name), full_page=True)
+                    return False, f"Login window timed out. Screenshot -> {name}"
+                finally:
+                    with suppress_exc():
+                        ctx.close()
+                    with suppress_exc():
+                        browser.close()
+
+        # Path 2: fallback when an asyncio loop is running — spawn a subprocess
+        helper = textwrap.dedent(f"""
+            import re, time
+            from playwright.sync_api import sync_playwright
+            DEFAULT_APP_URL = {DEFAULT_APP_URL!r}
+            STATE_PATH = {str(STATE_PATH)!r}
+            DEFAULT_TIMEOUT_MS = {DEFAULT_TIMEOUT_MS}
+            def _route_slim(route):
+                req = route.request
+                if req.resource_type in ("image","media","font"): return route.abort()
+                url = req.url
+                if url.endswith((".map",".svg")): return route.abort()
+                return route.continue_()
+            def _get_chip(page):
+                try:
+                    el = page.locator("header, main").locator("text=/^(Not created|Draft|Open|Approval pending|Submitted)$/i").first
+                    if el.count(): return (el.inner_text() or "").strip()
+                except Exception: pass
+                return ""
+            with sync_playwright() as p:
+                br = p.chromium.launch(headless=False, args=["--disable-dev-shm-usage"])
+                ctx = br.new_context()
+                ctx.set_default_timeout(DEFAULT_TIMEOUT_MS)
+                ctx.route("**/*", _route_slim)
+                pg = ctx.new_page()
+                try:
+                    try:
+                        pg.goto(DEFAULT_APP_URL, timeout=45_000)
+                    except Exception:
+                        pg.goto("https://app.napta.io", timeout=45_000)
+                        pg.goto(DEFAULT_APP_URL, timeout=45_000)
+                    start = time.time()
+                    ok = False
+                    while time.time() - start < 180:
+                        if pg.get_by_role("button", name=re.compile(r"Create timesheet", re.I)).count():
+                            ctx.storage_state(path=STATE_PATH); ok=True; break
+                        if pg.get_by_role("button", name=re.compile(r"^Save$", re.I)).count():
+                            ctx.storage_state(path=STATE_PATH); ok=True; break
+                        if pg.get_by_role("button", name=re.compile(r"Submit for approval", re.I)).count():
+                            ctx.storage_state(path=STATE_PATH); ok=True; break
+                        if _get_chip(pg):
+                            ctx.storage_state(path=STATE_PATH); ok=True; break
+                        time.sleep(0.5)
+                    print("OK" if ok else "TIMEOUT")
+                finally:
+                    try: ctx.close()
+                    except Exception: pass
+                    try: br.close()
+                    except Exception: pass
+        """)
+        proc = subprocess.run([sys.executable, "-c", helper], capture_output=True, text=True)
+        if proc.returncode == 0 and "OK" in proc.stdout and STATE_PATH.exists():
+            self._cookie_ok = True
+            return True, "✅ Login captured. You can now run: view / save / submit."
+        return False, "Login window timed out or failed in helper. Please try again."
+
+
+    # ─────────────────────────────── View ───────────────────────────────
+
+    def _view_cache_get(self, which: str) -> Optional[str]:
+        try:
+            d = json.loads(self._view_cache_path.read_text())
+            fresh = (time.time() - d["ts"]) < 10 and d.get("which")==which
+            return d["text"] if fresh else None
+        except Exception:
+            return None
+
+    def _view_cache_put(self, which: str, text: str) -> None:
+        with suppress_exc():
+            self._view_cache_path.write_text(json.dumps({"ts": time.time(), "which": which, "text": text}))
+
+
+    def _view_week_fast(self, which: str = "current") -> Tuple[bool, str]:
+        """Render the current or next week view in readable grid format."""
+        cached = self._view_cache_get(which)
+        if cached:
+            return True, cached
+
+        # Headless browser session (uses saved state)
+        self._ensure_session(headless=True)
+        #self._open_timesheet()
+        _, err = _safe_run(lambda: self._open_timesheet(), "page load")
+        if err:
+            return False, err
+
+
+        if self._on_login_page():
+            name = f"napta_login_required_{ts()}.png"
+            self._page.screenshot(path=_shot(name), full_page=True)
+            return False, f"⛔ Napta login required. Please open https://app.napta.io once in Chrome. Screenshot -> {name}"
+
+        # Navigate if user asked for "next" week
+        if which == "next":
+            if not self._go_to_next_week():
+                name = f"napta_nav_verify_{ts()}.png"
+                self._page.screenshot(path=_shot(name), full_page=True)
+                return False, f"❌ Navigation didn't land on next week. Screenshot -> {name}"
+
+        # Allow DOM to fully update after week switch
+        self._page.wait_for_load_state("domcontentloaded", timeout=5_000)
+        time.sleep(1.5)
+
+
+        # Wait for Save/Submit buttons or state chips
+        _ = _wait_for_save_submit_chip(self._page, timeout_ms=DEFAULT_TIMEOUT_MS)
+        chip = _get_status_chip_text(self._page) or "unknown"
+        title = _get_week_title(self._page) or "Week"
+
+        # Find the table/grid container
+        tbl = _find_timesheet_table(self._page)
+        if not tbl.count():
+            # Post-submit some tenants land elsewhere; reload once
+            with suppress_exc():
+                self._page.goto(DEFAULT_APP_URL, timeout=45_000)
+                self._page.wait_for_load_state("domcontentloaded", timeout=3_000)
+            tbl = _find_timesheet_table(self._page)
+        if not tbl.count():
+            msg = f"🗓 {title}\nStatus: {chip}\nℹ️ Could not locate the timesheet table."
+            self._view_cache_put(which, msg)
+            return True, msg
+
+        # Prefer robust headers (includes synthesized labels if DOM parsing fails)
+        day_cols = _get_weekday_headers(self._page)
+        if not day_cols:
+            day_cols = _get_weekday_headers(tbl)
+
+        if not day_cols:
+            # Last resort: show title & status only
+            msg = f"🗓 {title}\nStatus: {chip}\n(Headers not found)"
+            self._view_cache_put(which, msg)
+            return True, msg
+
+        # Try reading grid rows (native, ARIA, or flex layouts)
+        rows = _verbatim_grid(tbl, day_cols)
+        if not rows:
+            with suppress_exc():
+                rows = _read_flex_grid(tbl, day_cols)
+
+        # ─────────── Build formatted output ───────────
+        lines = [f"🗓 {title}"]
+        if chip and chip.lower() != "unknown":
+            lines.append(chip)
+        #lines.append(f"Status: {chip or 'unknown'}")
+        lines.append("")
+
+        #labels = [label for _, label in day_cols]
+        labels = _pretty_labels(day_cols)
+
+        lines.append(" | ".join(["Project"] + labels))
+        lines.append("-" * max(40, len(lines[-1])))
+
+        if rows:
+            for proj, cells in rows:
+                # Pad/trim to match header count for clean columns
+                if len(cells) < len(labels):
+                    cells = cells + [""] * (len(labels) - len(cells))
+                elif len(cells) > len(labels):
+                    cells = cells[:len(labels)]
+                lines.append(" | ".join([proj] + cells))
+        else:
+            lines.append("(No rows)")
+
+        msg = "\n".join(lines)
+        self._view_cache_put(which, msg)
+        return True, msg
+
+
+    def _go_to_next_week(self) -> bool:
+        # Use either the parsed title or the header fingerprint as the "before" marker
+        before_title = (_get_week_title(self._page) or "").strip()
+        before_fp = _period_fingerprint(self._page)
+        before = before_title or before_fp
+
+        attempts = 0
+        while attempts < 3:
+            attempts += 1
+            with suppress_exc():
+                # data-cy variants
+                self._page.locator('[data-cy*="navRight"], [data-cy*="PeriodNavigation_navRight"]').first.click(timeout=SHORT_TIMEOUT_MS)
+            with suppress_exc():
+                # generic "Next"
+                self._page.get_by_role("button", name=re.compile(r"Next|>", re.I)).first.click(timeout=SHORT_TIMEOUT_MS)
+            with suppress_exc():
+                # keyboard fallback
+                self._page.keyboard.press("ArrowRight")
+
+            # Wait for week label OR fingerprint to change (longer to handle slow loads)
+            for _ in range(30):
+                after_title = (_get_week_title(self._page) or "").strip()
+                after_fp = _period_fingerprint(self._page)
+                after = after_title or after_fp
+                if after and after != before:
+                    return True
+                time.sleep(0.3)
+        return False
+
+    # ─────────────────────────── Save / Submit (fast) ───────────────────────────
+
+    def _save_current_week_fast(self) -> Tuple[bool, str]:
+        self._ensure_session(headless=True)
+        _, err = _safe_run(lambda: self._open_timesheet(), "page load")
+        if err:
+            return False, err
+
+
+        if self._on_login_page():
+            name = f"napta_login_required_{ts()}.png"; self._page.screenshot(path=_shot(name), full_page=True)
+            return False, f"⛔ Napta login required. Please open https://app.napta.io once in Chrome. Screenshot -> {name}"
+
+        state = _wait_for_save_submit_chip(self._page, timeout_ms=SHORT_TIMEOUT_MS)
+        if state is None:
+            return True, "ℹ️ Timesheet already submitted for this week."
+
+        if state == "create":
+            if not _click_create(self._page):
+                name = f"napta_create_failure_{ts()}.png"; self._page.screenshot(path=_shot(name), full_page=True)
+                return False, f"❌ Could not click 'Create timesheet'. Screenshot -> {name}"
+            state = _wait_for_save_submit_chip(self._page, timeout_ms=SHORT_TIMEOUT_MS)
+            if state is None:
+                return False, "❌ After 'Create', no Save/Submit visible."
+
+        if state == "submit":
+            return True, "✅ Timesheet already saved. 'Submit for approval' is visible."
+
+        if not _click_save(self._page):
+            name = f"napta_save_failure_{ts()}.png"; self._page.screenshot(path=_shot(name), full_page=True)
+            return False, f"❌ Could not click 'Save'. Screenshot -> {name}"
+
+        _saw_saved_toast(self._page)
+        with suppress_exc(): self._view_cache_path.unlink()
+        return True, "✅ Saved (draft)."
+
+    def _save_next_week_fast(self) -> Tuple[bool, str]:
+        self._ensure_session(headless=True)
+        _, err = _safe_run(lambda: self._open_timesheet(), "page load")
+        if err:
+            return False, err
+
+
+        if self._on_login_page():
+            name = f"napta_login_required_{ts()}.png"; self._page.screenshot(path=_shot(name), full_page=True)
+            return False, f"⛔ Napta login required. Please open https://app.napta.io once in Chrome. Screenshot -> {name}"
+
+        if not self._go_to_next_week():
+            name = f"napta_error_{ts()}.png"; self._page.screenshot(path=_shot(name), full_page=True)
+            return False, f"❌ Could not navigate to next week. Screenshot -> {name}"
+
+        state = _wait_for_save_submit_chip(self._page, timeout_ms=SHORT_TIMEOUT_MS)
+        if state is None and _has_submit_button(self._page):
+            return True, "✅ Next week saved. Do you want to 'Submit for approval'? Type sbnw"
+        if state is None:
+            chip = (_get_status_chip_text(self._page) or "").strip().lower()
+            if chip.startswith(("approval pending", "submitted")):
+                return True, "ℹ️ Next week already submitted."
+            return True, "✅ Next week already saved. 'Submit for approval' may be visible."
+
+        if state == "create":
+            if not _click_create(self._page):
+                name = f"napta_create_failure_{ts()}.png"; self._page.screenshot(path=_shot(name), full_page=True)
+                return False, f"❌ Could not click 'Create timesheet'. Screenshot -> {name}"
+            state = _wait_for_save_submit_chip(self._page, timeout_ms=SHORT_TIMEOUT_MS)
+            if state is None:
+                return False, "❌ After 'Create', no Save/Submit visible."
+
+        if state == "submit":
+            return True, "✅ Next week already saved. 'Submit for approval' is visible."
+
+        if not _click_save(self._page):
+            name = f"napta_save_failure_{ts()}.png"; self._page.screenshot(path=_shot(name), full_page=True)
+            return False, f"❌ Could not click 'Save'. Screenshot -> {name}"
+
+        _saw_saved_toast(self._page)
+        with suppress_exc(): self._view_cache_path.unlink()
+        return True, "✅ Next week saved (draft)."
+
+    def _submit_current_week_fast(self) -> Tuple[bool, str]:
+        self._ensure_session(headless=True)
+        _, err = _safe_run(lambda: self._open_timesheet(), "page load")
+        if err:
+            return False, err
+
+
+        if self._on_login_page():
+            name = f"napta_login_required_{ts()}.png"; self._page.screenshot(path=_shot(name), full_page=True)
+            return False, f"⛔ Napta login required. Please open https://app.napta.io once in Chrome. Screenshot -> {name}"
+
+        state = _wait_for_save_submit_chip(self._page, timeout_ms=SHORT_TIMEOUT_MS)
+        if state is None:
+            return True, "ℹ️ Timesheet already submitted."
+
+        if state == "create":
+            if not _click_create(self._page):
+                name = f"napta_create_failure_{ts()}.png"; self._page.screenshot(path=_shot(name), full_page=True)
+                return False, f"❌ Could not click 'Create timesheet'. Screenshot -> {name}"
+            state = _wait_for_save_submit_chip(self._page, timeout_ms=SHORT_TIMEOUT_MS)
+
+        if state == "save":
+            if not _click_save(self._page):
+                return False, "❌ Could not click 'Save' before submit."
+            _saw_saved_toast(self._page)
+            state = "submit"
+
+        if state == "submit":
+            if not _click_submit(self._page):
+                return False, "❌ Could not click 'Submit for approval'."
+            with suppress_exc(): self._view_cache_path.unlink()
+            return True, "✅ Submitted for approval."
+
+        return False, "❌ Unknown state while submitting."
+
+    def _submit_next_week_fast(self) -> Tuple[bool, str]:
+        self._ensure_session(headless=True)
+        _, err = _safe_run(lambda: self._open_timesheet(), "page load")
+        if err:
+            return False, err
+
+
+        if self._on_login_page():
+            name = f"napta_login_required_{ts()}.png"; self._page.screenshot(path=_shot(name), full_page=True)
+            return False, f"⛔ Napta login required. Please open https://app.napta.io once in Chrome. Screenshot -> {name}"
+
+        if not self._go_to_next_week():
+            name = f"napta_error_{ts()}.png"; self._page.screenshot(path=_shot(name), full_page=True)
+            return False, f"❌ Could not navigate to next week. Screenshot -> {name}"
+
+        state = _wait_for_save_submit_chip(self._page, timeout_ms=SHORT_TIMEOUT_MS)
+        if state is None:
+            return True, "ℹ️ Next week already submitted."
+
+        if state == "save":
+            if not _click_save(self._page):
+                return False, "❌ Could not click 'Save' before submit."
+            _saw_saved_toast(self._page)
+            state = "submit"
+
+        if state == "submit":
+            if not _click_submit(self._page):
+                return False, "❌ Could not click 'Submit for approval'."
+            with suppress_exc(): self._view_cache_path.unlink()
+            return True, "✅ Next week submitted for approval."
+
+        if state == "create":
+            if not _click_create(self._page):
+                name = f"napta_create_failure_{ts()}.png"; self._page.screenshot(path=_shot(name), full_page=True)
+                return False, f"❌ Could not click 'Create timesheet'. Screenshot -> {name}"
+            # After creating, save+submit if available
+            state = _wait_for_save_submit_chip(self._page, timeout_ms=SHORT_TIMEOUT_MS)
+            if state == "save":
+                if not _click_save(self._page):
+                    return False, "❌ Could not click 'Save' after creating."
+                _saw_saved_toast(self._page)
+                state = "submit"
+            if state == "submit":
+                if not _click_submit(self._page):
+                    return False, "❌ Could not click 'Submit for approval'."
+                with suppress_exc(): self._view_cache_path.unlink()
+                return True, "✅ Next week submitted for approval."
+
+        return False, "❌ Unknown state while submitting."

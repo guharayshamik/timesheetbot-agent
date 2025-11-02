@@ -7,116 +7,174 @@ from datetime import datetime
 from typing import List, Tuple, Optional, Dict, Any, Sequence
 
 from .storage import load_session, save_session, clear_session
-from .ph_sg import PUBLIC_HOLIDAYS  # pass PHs to the generator
+#from .ph_sg import PUBLIC_HOLIDAYS  # pass PHs to the generator
+from .config_loader import load_config, load_sg_holidays
+
+
 
 log = logging.getLogger("timesheetbot_engine")
 
 # ---------- config ----------
-RANGE_SEP = r"(?:-|–|—|−|~|to|until|till|through|thru)"
 
-_MONTHS = {
-    "jan": "January", "feb": "February", "mar": "March", "apr": "April",
-    "may": "May", "jun": "June", "jul": "July", "aug": "August",
-    "sep": "September", "sept": "September", "oct": "October",
-    "nov": "November", "dec": "December",
-}
+cfg = load_config()
+EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.I)
+# RANGE_SEP = r"(?:-|–|—|−|~|to|until|till|through|thru)"
+RANGE_SEP = cfg.dates.range_regex.pattern
 
-_LEAVE_SYNONYMS = {
-    # --- Sick ---
-    "sick": "Sick Leave",
-    "mc": "Sick Leave",
-    "medical": "Sick Leave",
-    # variants / typos
-    "sick leave": "Sick Leave",
-    "sickleave": "Sick Leave",
-    "sikcleave": "Sick Leave",
-    "sicleave": "Sick Leave",
-    "sik leave": "Sick Leave",
-    "sic leave": "Sick Leave",
+PUBLIC_HOLIDAYS = load_sg_holidays()
+# MONTHS = {
+#     "jan": "January", "feb": "February", "mar": "March", "apr": "April",
+#     "may": "May", "jun": "June", "jul": "July", "aug": "August",
+#     "sep": "September", "sept": "September", "oct": "October",
+#     "nov": "November", "dec": "December",
+# }
+MONTHS = cfg.dates.months
 
-    # --- Annual ---
-    "annual": "Annual Leave",
-    "vacation": "Annual Leave",
-    "al": "Annual Leave",
-    # variants / typos
-    "annual leave": "Annual Leave",
-    "annualleave": "Annual Leave",
-    "anual leave": "Annual Leave",
-    "anualleave": "Annual Leave",
-    "ann leave": "Annual Leave",
-    "pto": "Annual Leave",
-    "leave": "Annual Leave",   # liberal
-    "oil": "Annual Leave",
-    "oli": "Annual Leave",
+LEAVE_SYNONYMS = cfg.leave.synonyms
 
-    # --- Childcare ---
-    "childcare": "Childcare Leave",
-    "cc": "Childcare Leave",
-    "childcare leave": "Childcare Leave",
-    "child care": "Childcare Leave",
-    "child care leave": "Childcare Leave",
+# LEAVE_SYNONYMS = {
+#     # --- Sick ---
+#     "sick": "Sick Leave",
+#     "mc": "Sick Leave",
+#     "medical": "Sick Leave",
+#     # variants / typos
+#     "sick leave": "Sick Leave",
+#     "sickleave": "Sick Leave",
+#     "sikcleave": "Sick Leave",
+#     "sicleave": "Sick Leave",
+#     "sik leave": "Sick Leave",
+#     "sic leave": "Sick Leave",
 
-    # --- NS ---
-    "ns": "NS Leave",
-    "national service": "NS Leave",
-    "ns leave": "NS Leave",
+#     # --- Annual ---
+#     "annual": "Annual Leave",
+#     "vacation": "Annual Leave",
+#     "al": "Annual Leave",
+#     # variants / typos
+#     "annual leave": "Annual Leave",
+#     "annualleave": "Annual Leave",
+#     "anual leave": "Annual Leave",
+#     "anualleave": "Annual Leave",
+#     "ann leave": "Annual Leave",
+#     "pto": "Annual Leave",
+#     "leave": "Annual Leave",   # liberal
+#     "oil": "Annual Leave",
+#     "oli": "Annual Leave",
 
-    # --- Weekend Efforts (OT on Sat/Sun) ---
-    "weekend": "Weekend Efforts",
-    "weekend effort": "Weekend Efforts",
-    "weekend efforts": "Weekend Efforts",
-    "weekend work": "Weekend Efforts",
-    "worked weekend": "Weekend Efforts",
-    "we": "Weekend Efforts",
-    "wknd": "Weekend Efforts",
-    "wknd effort": "Weekend Efforts",
-    "week-end": "Weekend Efforts",
+#     # --- Childcare ---
+#     "childcare": "Childcare Leave",
+#     "cc": "Childcare Leave",
+#     "childcare leave": "Childcare Leave",
+#     "child care": "Childcare Leave",
+#     "child care leave": "Childcare Leave",
 
-    # --- Public Holiday Efforts (OT on PH) ---
-    "public holiday effort": "Public Holiday Efforts",
-    "public holiday efforts": "Public Holiday Efforts",
-    "public holiday work": "Public Holiday Efforts",
-    "ph effort": "Public Holiday Efforts",
-    "ph efforts": "Public Holiday Efforts",
-    "ph work": "Public Holiday Efforts",
-    "ph ot": "Public Holiday Efforts",
-    "ph-ot": "Public Holiday Efforts",
+#     # --- NS ---
+#     "ns": "NS Leave",
+#     "national service": "NS Leave",
+#     "ns leave": "NS Leave",
 
-    # --- Half day ---
-    "half day": "Half Day",
-    "halfday": "Half Day",
-    "half-day": "Half Day",
-    "hafday": "Half Day",
-    "haf day": "Half Day",
-    "hd": "Half Day",
-    "1/2 day": "Half Day",
-}
+#     # --- Weekend Efforts (OT on Sat/Sun) ---
+#     "weekend": "Weekend Efforts",
+#     "weekend effort": "Weekend Efforts",
+#     "weekend efforts": "Weekend Efforts",
+#     "weekend work": "Weekend Efforts",
+#     "worked weekend": "Weekend Efforts",
+#     "we": "Weekend Efforts",
+#     "wknd": "Weekend Efforts",
+#     "wknd effort": "Weekend Efforts",
+#     "week-end": "Weekend Efforts",
 
-_ALLOWED_TYPES = {v for v in _LEAVE_SYNONYMS.values()} | {
-    "Sick Leave", "Annual Leave", "Childcare Leave", "NS Leave",
-    "Weekend Efforts", "Public Holiday Efforts", "Half Day",
-}
+#     # --- Public Holiday Efforts (OT on PH) ---
+#     "public holiday effort": "Public Holiday Efforts",
+#     "public holiday efforts": "Public Holiday Efforts",
+#     "public holiday work": "Public Holiday Efforts",
+#     "ph effort": "Public Holiday Efforts",
+#     "ph efforts": "Public Holiday Efforts",
+#     "ph work": "Public Holiday Efforts",
+#     "ph ot": "Public Holiday Efforts",
+#     "ph-ot": "Public Holiday Efforts",
+
+#     # --- Half day ---
+#     "half day": "Half Day",
+#     "halfday": "Half Day",
+#     "half-day": "Half Day",
+#     "hafday": "Half Day",
+#     "haf day": "Half Day",
+#     "hd": "Half Day",
+#     "1/2 day": "Half Day",
+# }
+
+ALLOWED_TYPES = cfg.leave.canonical
+# ALLOWED_TYPES = {v for v in LEAVE_SYNONYMS.values()} | {
+#     "Sick Leave", "Annual Leave", "Childcare Leave", "NS Leave",
+#     "Weekend Efforts", "Public Holiday Efforts", "Half Day",
+# }
+
+# FINANCE_CC_EMAIL = "sg-finance@palo-it.com"
+FINANCE_CC_EMAIL = cfg.org.finance_cc_email
 
 # ---------- helpers ----------
 def _full_month_name(token: str) -> Optional[str]:
     t = token.strip()
     if len(t) <= 3:
-        return _MONTHS.get(t.lower())
+        return MONTHS.get(t.lower())
     cap = t.capitalize()
-    if cap in _MONTHS.values():
+    if cap in MONTHS.values():
         return cap
-    return _MONTHS.get(t[:3].lower())
+    return MONTHS.get(t[:3].lower())
+
+def _parse_single_no_month(text: str) -> Optional[int]:
+    """
+    Extract a single day number from text when no explicit month name is present.
+    Updated to escape month keys (handles dotted month forms like 'sept.').
+    """
+    m = re.search(r"\bon\s+(\d{1,2})(?:st|nd|rd|th)?\b(?!\s*[A-Za-z])", text, flags=re.I)
+    if m:
+        return _std_day(m.group(1))
+
+    # Escape month keys from config for safe regex use
+    month_keys = "|".join(re.escape(k) for k in MONTHS.keys())
+    m2 = re.search(
+        rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\b(?!\s*(?:{month_keys}))",
+        text,
+        flags=re.I,
+    )
+    if m2 and not _parse_range(text):
+        return _std_day(m2.group(1))
+    return None
+
+
+# def _month_from_text(text: str) -> Optional[str]:
+#     m = re.search(r"\b(for|in)\s+([A-Za-z]{3,9})\b", text, flags=re.I)
+#     if m:
+#         return _full_month_name(m.group(2))
+#     m2 = re.search(r"\b([A-Za-z]{3,9})\s+(timesheet|sheet)\b", text, flags=re.I)
+#     if m2:
+#         return _full_month_name(m2.group(1))
+#     m3 = re.search(r"\b([A-Za-z]{3,9})\b", text, flags=re.I)
+#     if m3 and re.search(r"\b(generate|submit|create)\b", text, flags=re.I):
+#         return _full_month_name(m3.group(1))
+#     return None
 
 def _month_from_text(text: str) -> Optional[str]:
+    # 1) explicit "for|in <Month>"
     m = re.search(r"\b(for|in)\s+([A-Za-z]{3,9})\b", text, flags=re.I)
     if m:
-        return _full_month_name(m.group(2))
-    m2 = re.search(r"\b([A-Za-z]{3,9})\s+(timesheet|sheet)\b", text, flags=re.I)
+        mon = _full_month_name(m.group(2))
+        if mon:
+            return mon
+
+    # 2) "<Month> (timesheet|sheet|ts)"
+    m2 = re.search(r"\b([A-Za-z]{3,9})\s+(?:timesheet|sheet|ts)\b", text, flags=re.I)
     if m2:
-        return _full_month_name(m2.group(1))
-    m3 = re.search(r"\b([A-Za-z]{3,9})\b", text, flags=re.I)
-    if m3 and re.search(r"\b(generate|submit|create)\b", text, flags=re.I):
-        return _full_month_name(m3.group(1))
+        mon = _full_month_name(m2.group(1))
+        if mon:
+            return mon
+
+    # 3) Fallback: scan all tokens and return the first that is a month
+    for tok in re.findall(r"\b([A-Za-z]{3,9})\b", text, flags=re.I):
+        mon = _full_month_name(tok)
+        if mon:
+            return mon
     return None
 
 def _std_day(tok: str) -> Optional[int]:
@@ -178,13 +236,13 @@ def _parse_range_no_month(text: str) -> Optional[Tuple[int, int]]:
     if d1 and d2: return (min(d1, d2), max(d1, d2))
     return None
 
-def _parse_single_no_month(text: str) -> Optional[int]:
-    m = re.search(r"\bon\s+(\d{1,2})(?:st|nd|rd|th)?\b(?!\s*[A-Za-z])", text, flags=re.I)
-    if m: return _std_day(m.group(1))
-    month_keys = "|".join(_MONTHS.keys())
-    m2 = re.search(rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\b(?!\s*(?:{month_keys}))", text, flags=re.I)
-    if m2 and not _parse_range(text): return _std_day(m2.group(1))
-    return None
+# def _parse_single_no_month(text: str) -> Optional[int]:
+#     m = re.search(r"\bon\s+(\d{1,2})(?:st|nd|rd|th)?\b(?!\s*[A-Za-z])", text, flags=re.I)
+#     if m: return _std_day(m.group(1))
+#     month_keys = "|".join(MONTHS.keys())   # <- UPDATED
+#     m2 = re.search(rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\b(?!\s*(?:{month_keys}))", text, flags=re.I)
+#     if m2 and not _parse_range(text): return _std_day(m2.group(1))
+#     return None
 
 def _extract_days_list(blob: str) -> List[int]:
     parts = re.split(r"(?:\s*,\s*|\s+and\s+|\s*&\s*)", blob.strip(), flags=re.I)
@@ -223,6 +281,16 @@ def _find_overlap(leave_details, start: str, end: str):
             return i, (s, e, t)
     return None, None
 
+def _find_all_overlaps(leave_details, start: str, end: str):
+    """
+    Return list of (idx, (start, end, type)) for entries that overlap [start, end] in the same month.
+    """
+    out = []
+    for i, (s, e, t) in enumerate(leave_details):
+        if _ranges_overlap(start, end, s, e):
+            out.append((i, (s, e, t)))
+    return out
+
 def _extract_comment_after(text: str, matched_span: tuple[int, int]) -> str:
     """Return everything after the matched date as the comment, stripped of separators."""
     _, end = matched_span
@@ -253,18 +321,16 @@ def _detect_leave_type(text: str) -> Optional[str]:
     import re
     specific_hit = None
     generic_hit = None
-    for k, canon in _LEAVE_SYNONYMS.items():
+    for k, canon in LEAVE_SYNONYMS.items():   # <- UPDATED
         if re.search(rf"\b{re.escape(k)}\b", text, flags=re.I):
             if k == "leave":
-                generic_hit = canon      # remember as fallback
-                continue                 # skip for now; try to find something specific
-            # first specific match wins (ns, sick, childcare, etc.)
+                generic_hit = canon
+                continue
             specific_hit = canon
             break
     if specific_hit:
         return specific_hit
-    # If user literally typed a full allowed type, accept that too
-    for a in _ALLOWED_TYPES:
+    for a in ALLOWED_TYPES:                    # <- UPDATED
         if re.search(rf"\b{re.escape(a)}\b", text, flags=re.I):
             return a
     return generic_hit
@@ -290,23 +356,53 @@ class Engine:
             ans = text.strip().lower()
             overlap = sess["pending_overlap"]
             if ans in ("yes", "y", "yeah", "yep", "sure"):
-                sess["leave_details"][overlap["idx"]] = overlap["new"]
-                _, new_month = _split(overlap["new"][0])
-                sess["recent_leave_month"] = new_month
-                sess["month"] = new_month
-                sess.pop("pending_overlap")
-                save_session(sess)
-                return [
-                    f"🔄 Replaced {overlap['old'][2]} {overlap['old'][0]}–{overlap['old'][1]} with {overlap['new'][2]}.",
-                    "You can add more leaves or type `/generate`.",
-                ]
+                new_tuple = overlap["new"]  # (start, end, type)
+                # Multi-overlap path
+                if "old_list" in overlap:
+                    # Remove all old entries (by index, descending so indices stay valid)
+                    for idx, _old in sorted(overlap["old_list"], key=lambda x: x[0], reverse=True):
+                        sess["leave_details"].pop(idx)
+                    # Add the single consolidated replacement
+                    sess["leave_details"].append(new_tuple)
+
+                    _, new_month = _split(new_tuple[0])
+                    sess["recent_leave_month"] = new_month
+                    sess["month"] = new_month
+                    sess.pop("pending_overlap")
+                    save_session(sess)
+
+                    old_summary = "; ".join(
+                        f"{t} {s}–{e}" for _, (s, e, t) in overlap["old_list"]
+                    )
+                    return [
+                        f"🔄 Replaced {old_summary} with {new_tuple[2]}.",
+                        "You can add more leaves or type `generate`.",
+                    ]
+                # Single-overlap path (keeps existing behavior)
+                else:
+                    sess["leave_details"][overlap["idx"]] = new_tuple
+                    _, new_month = _split(new_tuple[0])
+                    sess["recent_leave_month"] = new_month
+                    sess["month"] = new_month
+                    sess.pop("pending_overlap")
+                    save_session(sess)
+                    return [
+                        f"🔄 Replaced {overlap['old'][2]} {overlap['old'][0]}–{overlap['old'][1]} with {new_tuple[2]}.",
+                        "You can add more leaves or type `generate`.",
+                    ]
             elif ans in ("no", "n", "nope"):
                 sess.pop("pending_overlap"); save_session(sess)
                 return ["❌ Kept your original leave. Discarded the new one."]
 
+
         # ---- generate intent?
-        wants_generate = bool(re.search(r"\b(generate|submit|create)\b.*\b(timesheet|sheet)\b", text, flags=re.I)) \
-                         or bool(re.search(r"^/generate\b|\bgenerate\b", text, flags=re.I))
+        # wants_generate = bool(re.search(r"\b(generate|submit|create)\b.*\b(timesheet|sheet)\b", text, flags=re.I)) \
+        #                  or bool(re.search(r"^/generate\b|\bgenerate\b", text, flags=re.I))
+        
+        wants_generate = (
+            bool(re.search(r"\b(generate|submit|create)\b.*\b(timesheet|sheet|ts)\b", text, flags=re.I))
+            or bool(re.search(r"^/(?:generate)\b|\bgenerate\b", text, flags=re.I))
+        )
 
         # ---- current month?
         month_mentioned = _month_from_text(text)
@@ -314,7 +410,8 @@ class Engine:
             sess["month"] = month_mentioned
 
         # ---- ADD COMMENT command
-        if re.search(r"^(?:/comment|/remark|add\s+comment|remark)\b", text, flags=re.I):
+        #if re.search(r"^(?:/comment|/remark|add\s+comment|remark)\b", text, flags=re.I):
+        if re.search(r"^(?:/(?:comment|comments)|add\s+comment|comments?|remarks?)\b", text, flags=re.I):
             start_key = None
             comment = None
 
@@ -328,12 +425,12 @@ class Engine:
                 sess["recent_leave_month"] = mon
                 sess["month"] = mon
             else:
-                # allow '/comment 11 OIL' when month is known in session
+                # allow 'comment 11 OIL' when month is known in session
                 single_no_mon = _parse_single_no_month(text)
                 if single_no_mon:
                     fallback_mon = sess.get("recent_leave_month") or sess.get("month")
                     if not fallback_mon:
-                        return ["⚠️ Please include a month (e.g., `/comment 11 Sep OIL`)."]
+                        return ["⚠️ Please include a month (e.g., `comment 11 Sep OIL`)."]
                     if not _valid(single_no_mon, fallback_mon):
                         return [f"⚠️ {single_no_mon}-{fallback_mon} is not a valid date."]
                     m = re.search(rf"\b{single_no_mon}(?:st|nd|rd|th)?\b", text, flags=re.I)
@@ -343,54 +440,53 @@ class Engine:
                     sess["month"] = fallback_mon
 
             if not start_key:
-                return ["⚠️ I couldn’t find the date. Example: `/comment 11 Sep OIL`."]
+                return ["⚠️ I couldn’t find the date. Example: `comment 11 Sep OIL`."]
 
             comment = (comment or "").strip()
             if not comment:
-                return ["⚠️ I didn’t catch the comment text. Example: `/comment 11 Sep: OIL`."]
+                return ["⚠️ I didn’t catch the comment text. Example: `comment 11 Sep: OIL`."]
 
             remarks = sess.get("remarks", {})
             remarks[start_key] = comment
             sess["remarks"] = remarks
             save_session(sess)
-            return [f"📝 Added remark “{comment}” for {start_key}. You can `/show` or `/generate`."]
+            return [f"📝 Added remark “{comment}” for {start_key}. You can `show` or `generate`."]
 
         # ---- EMAIL command
-        if re.search(r"^/email\b", text, flags=re.I):
+        if re.match(r"^/?email\b", text, flags=re.I):
             sess_meta = load_session()
             path_str = sess_meta.get("last_generated_path")
-            meta = sess_meta.get("last_generated_meta", {})
+            meta = sess_meta.get("last_generated_meta", {})  # <-- you were missing this
+
             if not path_str:
-                return ["⚠️ No generated file found. Please `/generate` the timesheet first."]
+                return ["⚠️ No generated file found. Please `generate` the timesheet first."]
 
             attachment = Path(path_str)
             if not attachment.exists():
-                return [f"⚠️ I can't find the file on disk: {attachment}. Please `/generate` again."]
+                return [f"⚠️ I can't find the file on disk: {attachment}. Please `generate` again."]
 
-            # Recipient: if user typed an email with the command, use that.
-            #m = re.search(r"/email\\s+(\\S+@\\S+)", text, flags=re.I)
-            #m = re.search(r"/email\s+(\S+@\S+)", text, flags=re.I)
-            m = re.search(r"/email\s+([^\s,;]+@[^\s,;]+)", text, flags=re.I)
 
-            to_addr = None
-            if m:
-                to_addr = m.group(1)
-            else:
-                # fallback to stored manager email if present
-                to_addr = (self.profile.get("manager_email") or "").strip()
+            # --- parse recipients (supports multiple) ---
+            # Only look for recipient(s) AFTER the command token (works for 'email' and '/email')
+            rest = re.sub(r"^/?email\b", "", text, flags=re.I).strip()
 
-            if not to_addr:
-                return [
-                    "⚠️ I don't know who to send this to. Either:",
-                    "  • type `/email manager@yourorg.com`, or",
-                    "  • add `manager_email` to your profile/registration.",
-                ]
+            # Find ALL valid emails (space / comma / semicolon separated all ok)
+            candidates = EMAIL_RE.findall(rest)  # ["a@x.com", "b@y.com", ...]
+            # Deduplicate while preserving order
+            to_list = [e.strip() for e in dict.fromkeys([c for c in candidates if c.strip()])]
 
+            # Fallback ONLY if no valid emails provided
+            if not to_list:
+                fallback = (self.profile.get("manager_email") or "").strip() or (self.profile.get("email") or "").strip()
+                if not fallback:
+                    return ["⚠️ No recipient email found. Try: `email someone@example.com` or add a manager email."]
+                to_list = [fallback]
+
+            # --- email content (unchanged) ---
             month = meta.get("month") or "Your"
             year = meta.get("year") or datetime.now().year
             employee = self.profile.get("name") or "Employee"
 
-            # NEW: personalize greeting from Reporting Officer's first name (saved during registration)
             mgr_first = (self.profile.get("manager_first_name") or "").strip()
             greeting = f"Hi {mgr_first}," if mgr_first else "Hi,"
 
@@ -403,22 +499,30 @@ class Engine:
                 "Regards,",
                 employee,
             ]
-            # Use CRLF to be safe across clients; mailer handles AppleScript 'return' too
-            body = "\r\n".join(body_lines)
+            body = "\n".join(body_lines)
 
+            # --- CC: user's email + Finance ---
+            cc_candidates = [
+                (self.profile.get("email") or "").strip(),
+                FINANCE_CC_EMAIL,  # defined at top
+            ]
+            cc_list = [a for a in dict.fromkeys([x for x in cc_candidates if x])]
 
+            # Remove duplicates already present in To:
+            cc_list = [c for c in cc_list if c not in to_list]
 
             try:
                 mailer.compose_with_best_available(
-                    to=[to_addr],
+                    to=to_list,                 # <-- multiple recipients now
                     subject=subject,
                     body=body,
                     attachment=attachment,
-                    cc=[self.profile.get("email")] if self.profile.get("email") else None,
+                    cc=cc_list or None,
                 )
                 return [
                     "✉️ Opening your email client with the timesheet attached…",
-                    f"To: {to_addr}",
+                    f"To: {', '.join(to_list)}",
+                    (f"CC: {', '.join(cc_list)}" if cc_list else "CC: —"),
                     f"Subject: {subject}",
                     "✅ Review and hit Send.",
                 ]
@@ -432,13 +536,6 @@ class Engine:
         # ---- leave type?
         leave_type = _detect_leave_type(text)
 
-        # for k, canon in _LEAVE_SYNONYMS.items():
-        #     if re.search(rf"\b{re.escape(k)}\b", text, flags=re.I):
-        #         leave_type = canon; break
-        # if not leave_type:
-        #     for a in _ALLOWED_TYPES:
-        #         if re.search(rf"\b{re.escape(a)}\b", text, flags=re.I):
-        #             leave_type = a; break
 
         leave_details: List[Sequence] = sess.get("leave_details", [])
 
@@ -482,7 +579,7 @@ class Engine:
                 leave_details.append((start, start, leave_type)); recorded.append(start)
             sess["leave_details"] = leave_details; sess["recent_leave_month"] = mon; sess["month"] = mon
             save_session(sess)
-            return [f"✅ Recorded {leave_type} on {', '.join(recorded)}.", "You can add more or type `/generate`."]
+            return [f"✅ Recorded {leave_type} on {', '.join(recorded)}.", "You can add more or type `generate`."]
 
         # ---- range
         if leave_type and date_range:
@@ -490,13 +587,23 @@ class Engine:
             if not _valid(d1, m1): return [f"⚠️ {d1}-{m1} is not a valid date."]
             if not _valid(d2, m2): return [f"⚠️ {d2}-{m2} is not a valid date."]
             start = _fmt(d1, m1); end = _fmt(d2, m2)
-            idx, existing = _find_overlap(leave_details, start, end)
-            if existing:
-                sess["pending_overlap"] = {"new": (start, end, leave_type), "old": existing, "idx": idx}
+
+            overlaps = _find_all_overlaps(leave_details, start, end)
+            if overlaps:
+                # Summarize all overlaps for a single confirmation
+                kinds = ", ".join(sorted({t for _, (_, _, t) in overlaps}))
+                old_summary = "; ".join(f"{t} {s}–{e}" for _, (s, e, t) in overlaps)
+                sess["pending_overlap"] = {
+                    "new": (start, end, leave_type),
+                    "old_list": overlaps,   # list[(idx, (s,e,t))]
+                }
                 save_session(sess)
-                return [f"⚠️ {start}–{end} already has {existing[2]}. Replace with {leave_type}? (yes/no)"]
+                return [f"⚠️ {start}–{end} overlaps existing: {old_summary}. Replace all with {leave_type}? (yes/no)"]
+
             leave_details.append((start, end, leave_type))
-            sess["leave_details"] = leave_details; sess["recent_leave_month"] = m1; sess["month"] = m1
+            sess["leave_details"] = leave_details
+            sess["recent_leave_month"] = m1
+            sess["month"] = m1
             save_session(sess)
             return [f"✅ Recorded {leave_type} from {start} to {end}."]
 
@@ -550,7 +657,7 @@ class Engine:
                 leave_details.append((start, start, leave_type)); recorded.append(start)
             sess["leave_details"] = leave_details; sess["recent_leave_month"] = fallback_mon; sess["month"] = fallback_mon
             save_session(sess)
-            return [f"✅ Recorded {leave_type} on {', '.join(recorded)}.", "You can add more or type `/generate`."]
+            return [f"✅ Recorded {leave_type} on {', '.join(recorded)}.", "You can add more or type `generate`."]
 
         # ---- generate
         if wants_generate:
@@ -584,7 +691,7 @@ class Engine:
                     sess["leave_details"] = leave_details
                     _, mon = _split(p["start_date"]); sess["recent_leave_month"] = mon; sess["month"] = mon
                     save_session(sess)
-                    return [f"✅ Recorded {p['leave_type']} on {p['start_date']}.", "You can add more or type `/generate`."]
+                    return [f"✅ Recorded {p['leave_type']} on {p['start_date']}.", "You can add more or type `generate`."]
             elif ans in ("no", "n", "nope"):
                 sess.pop("pending_leave", None); sess.pop("awaiting_confirmation", None); save_session(sess)
                 return ["❌ Okay, cancelled. Please rephrase your leave request."]
@@ -597,8 +704,8 @@ class Engine:
                 f"- generate timesheet for {current_month}",
                 f"- annual leave 11–13 {current_month[:3]}",
                 f"- sick leave on 10 {current_month[:3]}",
-                f"- /comment 11 {current_month[:3]} OIL",
-                f"- /email manager@yourorg.com",
+                f"- comment 11 {current_month[:3]} OIL",
+                f"- email manager@yourorg.com",
             ]
         else:
             return [
@@ -606,7 +713,7 @@ class Engine:
                 "- generate timesheet for September",
                 "- annual leave 11–13 Sep",
                 "- sick leave on 10 Sep",
-                "- /comment 11 Sep OIL",
+                "- comment 11 Sep OIL",
                 "⚠️ Please mention the month along with the date (e.g., 10th June).",
             ]
 

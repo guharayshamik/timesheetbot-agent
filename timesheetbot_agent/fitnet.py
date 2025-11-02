@@ -1,373 +1,413 @@
 # timesheetbot_agent/fitnet.py
 from __future__ import annotations
 
+import json
+import re
+import os
+import time
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import Optional, Tuple, Union
-from datetime import date, datetime
-from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+from typing import Optional, Tuple
 
-# ── Config ─────────────────────────────────────────────────────────────────────
+from getpass import getpass
+from playwright.sync_api import sync_playwright, TimeoutError as PWTimeoutError
 
-BASE_URL = "https://palo-it.fitnetmanager.com"
-STORAGE_STATE = Path.home() / ".tsbot" / "fitnet_state.json"
+from .storage import get_settings_path
 
-# Map bot leave names -> Fitnet “Holiday distribution” options (tweak if needed)
-FITNET_LEAVE_LABELS = {
-    "Sick Leave": "SICK LEAVE",
-    "Annual Leave": "ANNUAL LEAVES",
-    "Childcare Leave": "CHILDCARE LEAVE",
-    "NS Leave": "NS LEAVE",
-    "Weekend Efforts": "LEAVE IN LIEU",
-    "Public Holiday Efforts": "LEAVE IN LIEU",
-    "Half Day": "ANNUAL LEAVES",  # duration set separately
-}
+FITNET_LOGIN_URL = "https://palo-it.fitnetmanager.com/FitnetManager/login.xhtml"
+FITNET_STATE_PATH = Path.home() / ".tsbot" / "fitnet_storage_state.json"
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
+# XPaths (from user)
+X_VAC_LEAVE_BTN = '//*[@id="menuSideNew"]/div[1]/a[4]/div'
+X_ADD_BTN       = '//*[@id="historiqueListeCongesCtrl"]/div/div[1]/button[1]/span'
+X_LEAVE_SELECT  = '//*[@id="selectAbsenceTypes"]'
+X_BEGIN_DATE    = '//*[@id="beginLink0"]'
+X_END_DATE      = '//*[@id="endLink0"]'
+X_DESIGNATION   = '//*[@id="motifInput"]'
+X_CUST_INFORMED = '//*[@id="clientIsInformedAndReplacementChkbx"]/input'
+X_SAVE_BTN      = '//*[@id="saveButton"]'
 
-def _ensure_state_dir() -> None:
-    STORAGE_STATE.parent.mkdir(parents=True, exist_ok=True)
+# Network slimming
+_BLOCK = (
+    "googletagmanager.com", "google-analytics.com", "segment.io", "sentry.io",
+    "plausible.io", "fullstory.com", "intercom.io", "hotjar.com",
+    "gravatar.com", "unpkg.com",
+)
 
-def _fmt_d(d: datetime) -> str:
-    """Fitnet typically uses dd/MM/yyyy."""
-    return d.strftime("%d/%m/%Y")
+SHORT = 5_000
+DEFAULT = 12_000
+LONG = 60_000
 
-def _coerce_date(v: Union[str, date, datetime]) -> datetime:
-    """Accept a bunch of formats and return a date-only datetime."""
-    if isinstance(v, datetime):
-        return datetime(v.year, v.month, v.day)
-    if isinstance(v, date):
-        return datetime(v.year, v.month, v.day)
-    s = str(v).strip()
-    for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%d %b %Y", "%d %B %Y"):
-        try:
-            dt = datetime.strptime(s, fmt)
-            return datetime(dt.year, dt.month, dt.day)
-        except ValueError:
-            pass
-    # last resort
+DEBUG = bool(os.getenv("TSBOT_FITNET_DEBUG"))
+
+@dataclass
+class Creds:
+    username: str
+    password: str
+
+def _ts() -> str:
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+def _snap(page, name: str) -> str:
+    fn = f"fitnet_{name}_{_ts()}.png"
     try:
-        dt = datetime.fromisoformat(s)
-        return datetime(dt.year, dt.month, dt.day)
+        page.screenshot(path=fn, full_page=True)
     except Exception:
-        # Let caller turn this into a friendly message
-        raise ValueError(f"Unrecognized date format: {v!r}")
+        pass
+    return fn
 
-def _norm_half_day(v: Optional[str]) -> Optional[str]:
-    if not v:
+def _route_slim(route):
+    req = route.request
+    if req.resource_type in ("image", "media", "font"):
+        return route.abort()
+    if req.url.endswith((".map", ".svg")):
+        return route.abort()
+    if any(h in req.url for h in _BLOCK):
+        return route.abort()
+    return route.continue_()
+
+# ---------------- Creds ----------------
+def _load_creds() -> Optional[Creds]:
+    p = get_settings_path()
+    if not p.exists():
         return None
-    s = str(v).strip().lower()
-    if s in ("am", "morning", "a.m.", "am."):
-        return "AM"
-    if s in ("pm", "afternoon", "p.m.", "pm."):
-        return "PM"
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8")) or {}
+        f = raw.get("fitnet") or {}
+        u = (f.get("username") or "").strip()
+        pw = (f.get("password") or "").strip()
+        if u and pw:
+            return Creds(u, pw)
+    except Exception:
+        pass
     return None
 
-def _state_ok() -> bool:
-    """Does a saved login exist and look non-empty?"""
+def _save_creds(c: Creds) -> None:
+    p = get_settings_path()
+    raw = {}
+    if p.exists():
+        try:
+            raw = json.loads(p.read_text(encoding="utf-8")) or {}
+        except Exception:
+            raw = {}
+    raw["fitnet"] = {"username": c.username, "password": c.password}
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+
+def _get_or_prompt_creds() -> Creds:
+    c = _load_creds()
+    if c:
+        return c
+    print("\n— Fitnet login (stored locally in ~/.tsbot/settings.json) —")
+    u = input("Fitnet username (email): ").strip()
+    pw = getpass("Fitnet password: ").strip()
+    c = Creds(u, pw)
+    _save_creds(c)
+    return c
+
+# ---------------- Browser / context ----------------
+def _build_context(p, *, headless: bool = True):
+    browser = p.chromium.launch(headless=headless, args=["--disable-dev-shm-usage"])
+    if FITNET_STATE_PATH.exists():
+        ctx = browser.new_context(
+            storage_state=str(FITNET_STATE_PATH),
+            viewport={"width": 1400, "height": 900},
+        )
+    else:
+        ctx = browser.new_context(viewport={"width": 1400, "height": 900})
+    ctx.route("**/*", _route_slim)
+    ctx.set_default_timeout(DEFAULT)
+    return browser, ctx
+
+def _looks_logged_in(page) -> bool:
     try:
-        return STORAGE_STATE.exists() and STORAGE_STATE.stat().st_size > 50
+        if page.locator("xpath=//*[@id='menuSideNew']").count():
+            return True
+        return page.get_by_role("navigation").filter(
+            has_text=re.compile(r"Vacation\s*/\s*Leave|CONG[ÉE]S|ABSENCE", re.I)
+        ).count() > 0
     except Exception:
         return False
 
-# ── Session bootstrap ──────────────────────────────────────────────────────────
-
-def login_interactive() -> Tuple[bool, str]:
-    """
-    One-time login capture. Opens a visible browser; user completes SSO.
-    After user presses Enter in the terminal, cookies are saved for reuse.
-    """
+def _switch_to_last_page(ctx, current_page):
     try:
-        _ensure_state_dir()
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=False)
-            ctx = browser.new_context()
-            page = ctx.new_page()
-            page.set_default_timeout(15000)
+        if len(ctx.pages) and ctx.pages[-1] is not current_page:
+            return ctx.pages[-1]
+    except Exception:
+        pass
+    return current_page
 
-            page.goto(BASE_URL, wait_until="load")
-            print("➡️  Please complete Fitnet login in the opened browser.")
-            print("   When you see the main menu (TIMESHEET / VACATION / LEAVE),")
-            input("   press Enter here to save your session… ")
+# ---------------- Login ----------------
+def _login_if_needed(page, ctx, creds: Creds) -> None:
+    page.goto(FITNET_LOGIN_URL, wait_until="domcontentloaded", timeout=LONG)
+    if _looks_logged_in(page):
+        return
 
-            ctx.storage_state(path=str(STORAGE_STATE))
-            browser.close()
-
-        if _state_ok():
-            return True, f"✅ Fitnet session saved to {STORAGE_STATE}"
-        else:
-            return False, (
-                "❌ Could not save session cookies. "
-                "Please try `/login` again (keep the browser open until you press Enter)."
-            )
-    except Exception as e:
-        return False, f"❌ Login capture failed: {e}"
-
-def _ctx():
-    """
-    Start Playwright using saved cookies.
-    Caller MUST wrap this in try/except — this can raise RuntimeError.
-    """
-    if not _state_ok():
-        raise RuntimeError(
-            f"Not logged in. Run `/login` in the Fitnet menu, complete SSO, "
-            f"then press Enter. (Expected state at: {STORAGE_STATE})"
-        )
-    p = sync_playwright().start()
-    browser = p.chromium.launch(headless=False)  # visible == safer in prod
-    ctx = browser.new_context(storage_state=str(STORAGE_STATE))
-    return p, browser, ctx
-
-# ── Navigation helpers ─────────────────────────────────────────────────────────
-
-def _goto_vacation_leave(page) -> bool:
-    """
-    Try direct URL, then the home tile. Return True if an 'Add' button is present.
-    """
-    def _try_direct() -> bool:
-        try:
-            page.goto(f"{BASE_URL}/FitnetManager/saisieConge.xhtml",
-                      wait_until="domcontentloaded", timeout=20000)
-            page.wait_for_timeout(500)
-            return _find_add_button(page) is not None
-        except PWTimeout:
-            return False
-        except Exception:
-            return False
-
-    def _try_tile() -> bool:
-        try:
-            page.goto(BASE_URL, wait_until="domcontentloaded", timeout=20000)
-            for label in ("VACATION / LEAVE", "Vacation / Leave", "Leave", "Vacation"):
-                loc = page.get_by_text(label, exact=False)
-                if loc.count() > 0:
-                    loc.first.click()
-                    page.wait_for_timeout(600) 
-                    break
-            page.wait_for_timeout(1000)
-            return _find_add_button(page) is not None
-        except Exception:
-            return False
-
-    return _try_direct() or _try_tile()
-
-
-def _find_add_button(page):
-    """Return a locator for the Add/New button using many fallbacks, or None."""
-    texts = ["Add", "New", "Create", "Add request", "New request"]
-    selectors = [
-        'button:has-text("{t}")',
-        'a:has-text("{t}")',
-        '[role="button"]:has-text("{t}")',
-        'button[title*="{t}"]',
-        'span.ui-button-text:has-text("{t}")',
-        'span:has-text("{t}") >> xpath=ancestor::button[1]',
-        # common icon buttons
-        'i[class*="pi-plus"] >> xpath=ancestor::button[1]',
-        'i[class*="fa-plus"] >> xpath=ancestor::button[1]',
-        # generic text locator fallback
-        'text="{t}"',
+    user_fields = [
+        "input[name='j_username']", "#j_username", "input[type='email']",
+        "input[name='username']", "input[name='email']", "input[type='text']",
     ]
-    for t in texts:
-        for tpl in selectors:
-            sel = tpl.format(t=t)
+    pass_fields = [
+        "input[name='j_password']", "#j_password", "input[type='password']",
+        "input[name='password']",
+    ]
+
+    user = None
+    for s in user_fields:
+        loc = page.locator(s)
+        if loc.count():
+            user = loc.first
+            break
+    pwd = None
+    for s in pass_fields:
+        loc = page.locator(s)
+        if loc.count():
+            pwd = loc.first
+            break
+
+    if user and pwd:
+        user.fill(creds.username)
+        pwd.fill(creds.password)
+        try:
+            pwd.press("Enter")
+        except Exception:
+            pass
+        for s in ("input[type='submit']", "button[type='submit']",
+                  "xpath=//button[normalize-space()='Sign in']",
+                  "xpath=//input[@value='Sign in']",
+                  "xpath=//button[contains(., 'Se connecter')]"):
             try:
-                loc = page.locator(sel)
-                if loc.count() > 0:
-                    # if it's a plain text locator, climb to the closest button if possible
-                    try:
-                        btn = loc.first.locator("xpath=ancestor::button[1]")
-                        if btn.count() > 0:
-                            return btn.first
-                    except Exception:
-                        pass
-                    return loc.first
+                page.locator(s).first.click(timeout=SHORT)
+                break
             except Exception:
-                continue
-    return None
+                pass
 
+    # Wait for shell or menu
+    try:
+        page.wait_for_selector("xpath=//*[@id='menuSideNew']", timeout=LONG)
+    except PWTimeoutError:
+        raise RuntimeError("Fitnet login failed; check creds or complete SSO once (we will persist the session).")
 
+    # Persist session
+    ctx.storage_state(path=str(FITNET_STATE_PATH))
 
-# ── Main action ────────────────────────────────────────────────────────────────
+# ---------------- Page helpers ----------------
+def _open_leave_dialog(page) -> None:
+    # Click "Vacation / Leave"
+    btn = page.locator(f"xpath={X_VAC_LEAVE_BTN}")
+    btn.wait_for(state="visible", timeout=LONG)
+    try:
+        btn.scroll_into_view_if_needed()
+    except Exception:
+        pass
+    try:
+        btn.click(timeout=LONG)
+    except Exception:
+        # click via JS as a last resort
+        page.evaluate("(el)=>el.click()", btn.element_handle())
+
+    # Wait the list panel then click Add
+    page.locator(f"xpath={X_ADD_BTN}").wait_for(state="visible", timeout=LONG)
+    add_btn = page.locator(f"xpath={X_ADD_BTN}")
+    try:
+        add_btn.scroll_into_view_if_needed()
+    except Exception:
+        pass
+    try:
+        add_btn.click(timeout=LONG)
+    except Exception:
+        page.evaluate("(el)=>el.click()", add_btn.element_handle())
+
+    # Wait for the leave dialog (the select must be visible)
+    page.locator(f"xpath={X_LEAVE_SELECT}").wait_for(state="visible", timeout=LONG)
+
+def _select_leave_type(page, label_text: str) -> None:
+    sel = page.locator(f"xpath={X_LEAVE_SELECT}")
+    sel.wait_for(state="visible", timeout=LONG)
+    want = (label_text or "").strip().upper()
+
+    try:
+        sel.select_option(label=want)
+        return
+    except Exception:
+        pass
+
+    opts = sel.locator("xpath=.//option")
+    count = opts.count()
+    idx = None
+    for i in range(count):
+        txt = (opts.nth(i).inner_text() or "").strip().upper()
+        if txt == want or want in txt:
+            idx = i
+            break
+    if idx is None:
+        raise RuntimeError(f"Leave type '{label_text}' not found in dropdown.")
+    value = opts.nth(idx).get_attribute("value") or ""
+    sel.select_option(value=value)
+
+def _fill_date(page, link_xpath: str, dt: datetime) -> None:
+    ddmmyyyy = dt.strftime("%d/%m/%Y")
+    link = page.locator(f"xpath={link_xpath}")
+    link.wait_for(state="visible", timeout=LONG)
+    inp = link.locator("xpath=preceding-sibling::input[1]")
+    if inp.count():
+        inp.first.fill(ddmmyyyy)
+        return
+    tag = link.evaluate("el => el.tagName.toLowerCase()")
+    if tag == "input":
+        link.fill(ddmmyyyy)
+        return
+    page.evaluate(
+        """(el, v) => {
+            const inp = el.previousElementSibling && el.previousElementSibling.tagName==='INPUT'
+              ? el.previousElementSibling : el;
+            try { inp.removeAttribute('readonly'); } catch(e) {}
+            inp.value = v;
+            inp.dispatchEvent(new Event('input', {bubbles:true}));
+            inp.dispatchEvent(new Event('change', {bubbles:true}));
+        }""",
+        link.element_handle(), ddmmyyyy
+    )
+
+def _fill_designation(page, text: str) -> None:
+    inp = page.locator(f"xpath={X_DESIGNATION}")
+    inp.wait_for(state="visible", timeout=LONG)
+    inp.fill(text)
+
+def _tick_customer_informed(page) -> None:
+    chk = page.locator(f"xpath={X_CUST_INFORMED}")
+    if chk.count():
+        try:
+            if not chk.is_checked():
+                chk.check()
+        except Exception:
+            chk.click()
+
+def _click_save(page) -> None:
+    btn = page.locator(f"xpath={X_SAVE_BTN}")
+    try:
+        btn.scroll_into_view_if_needed()
+    except Exception:
+        pass
+    try:
+        btn.click(timeout=LONG)
+    except Exception:
+        page.evaluate("(el)=>el.click()", btn.element_handle())
+
+# ---------------- API ----------------
+_LEAVE_MAP = {
+    "mc": "SICK LEAVE",
+    "sick leave": "SICK LEAVE",
+    "annual leave": "ANNUAL LEAVES",
+    "annual leaves": "ANNUAL LEAVES",
+    "leave in lieu": "LEAVE IN LIEU",
+    "unpaid leave": "UNPAID LEAVE",
+    "child care leave": "CHILD CARE LEAVE",
+    "compassionate leave": "COMPASSIONATE LEAVE",
+    "hospitalization leave": "HOSPITALIZATION LEAVE",
+}
+
+def _norm_label(s: str) -> str:
+    return _LEAVE_MAP.get((s or "").strip().lower(), (s or "").strip().upper())
 
 def apply_leave(
-    start: Union[str, date, datetime],
-    end: Union[str, date, datetime],
+    *,
+    start: datetime,
+    end: datetime,
     leave_type: str,
     comment: str = "",
     half_day: Optional[str] = None,
-    *,
-    commit: bool = False,                  # default = preview only (no save)
-    screenshot_to: Optional[Path] = None,  # optional preview screenshot
-) -> Tuple[bool, str, Optional[Path]]:
-    """
-    Fill Fitnet ‘VACATION / LEAVE → Add’ form.
+    commit: bool = False,
+    screenshot_to: Optional[str] = None,
+) -> Tuple[bool, str, Optional[str]]:
+    creds = _get_or_prompt_creds()
+    label = _norm_label(leave_type)
+    shot = screenshot_to
 
-    Returns: (ok, message, screenshot_path_if_any)
-
-    Behavior:
-      • commit=False (default): fill the form, optionally take a screenshot,
-        and STOP before saving — safe for production testing.
-      • commit=True: attempt to click Save/Record/Validate.
-    """
-    # Normalize inputs (convert errors to clear messages)
-    try:
-        start_dt = _coerce_date(start)
-        end_dt = _coerce_date(end)
-        half_day = _norm_half_day(half_day)
-    except Exception as e:
-        return False, f"⚠️ Date parsing error: {e}", None
-
-    label = FITNET_LEAVE_LABELS.get(leave_type)
-    if not label:
-        return False, f"⚠️ Leave type not mapped to Fitnet: {leave_type}", None
-
-    p = browser = ctx = None
-    shot_path: Optional[Path] = None
-
-    try:
-        # Create session context (friendly message if not logged in)
+    with sync_playwright() as p:
+        browser = None
         try:
-            p, browser, ctx = _ctx()
-        except RuntimeError as e:
-            return False, f"⚠️ {e}", None
+            # Run headless normally; flip TSBOT_FITNET_DEBUG=1 for headed debug
+            browser, ctx = _build_context(p, headless=not DEBUG)
+            page = ctx.new_page()
 
-        page = ctx.new_page()
+            _login_if_needed(page, ctx, creds)
+            page = _switch_to_last_page(ctx, page)
 
-        # Click Add
-        try:
-            if not _goto_vacation_leave(page):
-                return False, "❌ Couldn't reach the VACATION / LEAVE screen.", None
-
-
-            add_btn = _find_add_button(page)
-            if not add_btn:
-                return False, "❌ Couldn't find the 'Add' button on VACATION / LEAVE.", None
-            add_btn.click()
-            page.wait_for_timeout(400)
-
-        except Exception:
-            return False, "❌ Couldn't find the 'Add' button on VACATION / LEAVE.", None
-
-        # Holiday distribution
-        try:
-            # Prefer label; fall back to nearby dropdown if needed
+            # Defensive: ensure the left nav exists before we proceed
             try:
-                page.get_by_label("Holiday distribution").click()
+                page.locator("xpath=//*[@id='menuSideNew']").wait_for(state="visible", timeout=LONG)
             except Exception:
-                page.locator("label:has-text('Holiday distribution')").first.click()
-            page.get_by_role("option", name=label).click()
-        except Exception:
-            return False, f"❌ Couldn't select Holiday distribution '{label}'.", None
+                if DEBUG:
+                    _snap(page, "no_menu_after_login")
+                return False, "Fitnet: app shell did not appear after login.", shot
 
-        # Begin / End
-        try:
+            # Open dialog
             try:
-                page.get_by_label("Begin").fill(_fmt_d(start_dt))
-            except Exception:
-                page.locator("label:has-text('Begin')").locator("xpath=following::input[1]").fill(_fmt_d(start_dt))
-            try:
-                page.get_by_label("End").fill(_fmt_d(end_dt))
-            except Exception:
-                page.locator("label:has-text('End')").locator("xpath=following::input[1]").fill(_fmt_d(end_dt))
-        except Exception:
-            return False, "❌ Couldn't fill Begin/End dates.", None
+                _open_leave_dialog(page)
+            except Exception as e:
+                if DEBUG:
+                    _snap(page, "open_dialog_failed")
+                return False, f"Fitnet: could not open Add dialog ({e}).", shot
 
-        # Half-day (optional)
-        if half_day in ("AM", "PM"):
+            # Fill
             try:
-                try:
-                    page.get_by_label("Duration").click()
-                except Exception:
-                    page.locator("label:has-text('Duration')").first.click()
-                for opt in ("1/2 day", "0.5 day", "Half day"):
-                    if page.get_by_role("option", name=opt).count() > 0:
-                        page.get_by_role("option", name=opt).click()
-                        break
-                try:
-                    page.get_by_label("Half-day").click()
-                except Exception:
-                    page.locator("label:has-text('Half')").first.click()
-                part = "morning" if half_day == "AM" else "afternoon"
-                for opt in (part.capitalize(), part, "AM" if half_day == "AM" else "PM"):
-                    if page.get_by_role("option", name=opt).count() > 0:
-                        page.get_by_role("option", name=opt).click()
-                        break
-            except Exception:
-                return False, "❌ Couldn't set half-day options.", None
+                _select_leave_type(page, label)
+                _fill_date(page, X_BEGIN_DATE, start)
+                _fill_date(page, X_END_DATE, end)
+                _fill_designation(page, "Sr. DevOps Engineer")
+                _tick_customer_informed(page)
+            except Exception as e:
+                if DEBUG:
+                    _snap(page, "fill_fields_failed")
+                return False, f"Fitnet: could not fill fields ({e}).", shot
 
-        # Comment (optional)
-        if comment:
+            if not commit:
+                if shot:
+                    _snap(page, "preview")
+                return True, "Prefilled in Fitnet (no save).", shot
+
+            # Save
             try:
-                try:
-                    page.get_by_label("Comment").fill(comment)
-                except Exception:
-                    page.locator("label:has-text('Comment')").locator(
-                        "xpath=following::textarea|following::input[1]"
-                    ).first.fill(comment)
+                _click_save(page)
+            except Exception as e:
+                if DEBUG:
+                    _snap(page, "save_click_failed")
+                return False, f"Fitnet: could not click Save ({e}).", shot
+
+            # Verify: dialog goes away OR a row appears quickly. We just wait a bit.
+            try:
+                page.locator(f"xpath={X_SAVE_BTN}").wait_for(state="detached", timeout=10_000)
             except Exception:
-                # Not fatal — continue without a comment
+                pass  # some tenants leave the button in DOM; we don't hard-fail here
+
+            if shot:
+                _snap(page, "saved")
+
+            return True, "Saved in Fitnet.", shot
+
+        except Exception as e:
+            try:
+                if not shot:
+                    shot = f"fitnet_error_{_ts()}.png"
+                if browser:
+                    ctx = browser.contexts[0]
+                    if ctx.pages:
+                        ctx.pages[-1].screenshot(path=shot, full_page=True)
+            except Exception:
+                pass
+            return False, f"Fitnet: {e}", shot
+        finally:
+            try:
+                if browser:
+                    browser.close()
+            except Exception:
                 pass
 
-        # Optional screenshot before saving
-        if screenshot_to:
-            try:
-                screenshot_to.parent.mkdir(parents=True, exist_ok=True)
-                page.wait_for_timeout(300)
-                page.screenshot(path=str(screenshot_to), full_page=True)
-                shot_path = screenshot_to
-            except Exception:
-                # Non-fatal; continue
-                pass
-
-        if not commit:
-            return (
-                True,
-                "👀 Preview ready — form filled, NOT saved.\n"
-                "   Review in the opened browser and click Save manually if all looks good.",
-                shot_path,
-            )
-
-        # Save (tenants differ: Save / Record / Validate / Submit / Enregistrer)
-        for button_name in ("Save", "Record", "Validate", "Submit", "Enregistrer"):
-            try:
-                if page.get_by_role("button", name=button_name).count() > 0:
-                    page.get_by_role("button", name=button_name).click()
-                    page.wait_for_timeout(800)
-                    return True, "✅ Fitnet leave created (saved).", shot_path
-            except Exception:
-                continue
-
-        return False, "❌ Couldn't find a Save/Record/Validate button.", shot_path
-
-    except Exception as e:
-        # Catch-all to keep the CLI clean
-        return False, f"❌ Fitnet automation failed: {e}", shot_path
-    finally:
-        try:
-            if browser:
-                browser.close()
-        except Exception:
-            pass
-        try:
-            if p:
-                p.stop()
-        except Exception:
-            pass
-
-
-# ── Optional convenience APIs used by the CLI (status, logout) ────────────────
-
-def session_status() -> Tuple[bool, str]:
-    """Quick check the saved cookie state."""
-    if _state_ok():
-        return True, f"✅ Logged in (cookies at {STORAGE_STATE})"
-    return False, "⚠️ Not logged in. Use `/login` in the Fitnet menu."
-
-def logout_state() -> Tuple[bool, str]:
-    """Delete saved cookie state."""
+def login() -> Tuple[bool, str]:
     try:
-        if STORAGE_STATE.exists():
-            STORAGE_STATE.unlink()
-        return True, "✅ Fitnet session cleared."
+        _ = _get_or_prompt_creds()
+        return True, "✅ Fitnet login saved locally."
     except Exception as e:
-        return False, f"❌ Couldn't clear session: {e}"
+        return False, f"❌ Fitnet login not saved: {e}"
