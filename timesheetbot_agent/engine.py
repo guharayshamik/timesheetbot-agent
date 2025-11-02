@@ -9,6 +9,11 @@ from typing import List, Tuple, Optional, Dict, Any, Sequence
 from .storage import load_session, save_session, clear_session
 from .ph_sg import PUBLIC_HOLIDAYS  # pass PHs to the generator
 
+
+
+EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.I)
+
+
 log = logging.getLogger("timesheetbot_engine")
 
 # ---------- config ----------
@@ -96,6 +101,8 @@ _ALLOWED_TYPES = {v for v in _LEAVE_SYNONYMS.values()} | {
     "Sick Leave", "Annual Leave", "Childcare Leave", "NS Leave",
     "Weekend Efforts", "Public Holiday Efforts", "Half Day",
 }
+
+FINANCE_CC_EMAIL = "sg-finance@palo-it.com"
 
 # ---------- helpers ----------
 def _full_month_name(token: str) -> Optional[str]:
@@ -356,10 +363,11 @@ class Engine:
             return [f"📝 Added remark “{comment}” for {start_key}. You can `/show` or `/generate`."]
 
         # ---- EMAIL command
-        if re.search(r"^/email\b", text, flags=re.I):
+        if re.match(r"^/?email\b", text, flags=re.I):
             sess_meta = load_session()
             path_str = sess_meta.get("last_generated_path")
-            meta = sess_meta.get("last_generated_meta", {})
+            meta = sess_meta.get("last_generated_meta", {})  # <-- you were missing this
+
             if not path_str:
                 return ["⚠️ No generated file found. Please `/generate` the timesheet first."]
 
@@ -367,30 +375,28 @@ class Engine:
             if not attachment.exists():
                 return [f"⚠️ I can't find the file on disk: {attachment}. Please `/generate` again."]
 
-            # Recipient: if user typed an email with the command, use that.
-            #m = re.search(r"/email\\s+(\\S+@\\S+)", text, flags=re.I)
-            #m = re.search(r"/email\s+(\S+@\S+)", text, flags=re.I)
-            m = re.search(r"/email\s+([^\s,;]+@[^\s,;]+)", text, flags=re.I)
 
-            to_addr = None
-            if m:
-                to_addr = m.group(1)
-            else:
-                # fallback to stored manager email if present
-                to_addr = (self.profile.get("manager_email") or "").strip()
+            # --- parse recipients (supports multiple) ---
+            # Only look for recipient(s) AFTER the command token (works for 'email' and '/email')
+            rest = re.sub(r"^/?email\b", "", text, flags=re.I).strip()
 
-            if not to_addr:
-                return [
-                    "⚠️ I don't know who to send this to. Either:",
-                    "  • type `/email manager@yourorg.com`, or",
-                    "  • add `manager_email` to your profile/registration.",
-                ]
+            # Find ALL valid emails (space / comma / semicolon separated all ok)
+            candidates = EMAIL_RE.findall(rest)  # ["a@x.com", "b@y.com", ...]
+            # Deduplicate while preserving order
+            to_list = [e.strip() for e in dict.fromkeys([c for c in candidates if c.strip()])]
 
+            # Fallback ONLY if no valid emails provided
+            if not to_list:
+                fallback = (self.profile.get("manager_email") or "").strip() or (self.profile.get("email") or "").strip()
+                if not fallback:
+                    return ["⚠️ No recipient email found. Try: `email someone@example.com` or add a manager email."]
+                to_list = [fallback]
+
+            # --- email content (unchanged) ---
             month = meta.get("month") or "Your"
             year = meta.get("year") or datetime.now().year
             employee = self.profile.get("name") or "Employee"
 
-            # NEW: personalize greeting from Reporting Officer's first name (saved during registration)
             mgr_first = (self.profile.get("manager_first_name") or "").strip()
             greeting = f"Hi {mgr_first}," if mgr_first else "Hi,"
 
@@ -403,22 +409,30 @@ class Engine:
                 "Regards,",
                 employee,
             ]
-            # Use CRLF to be safe across clients; mailer handles AppleScript 'return' too
             body = "\r\n".join(body_lines)
 
+            # --- CC: user's email + Finance ---
+            cc_candidates = [
+                (self.profile.get("email") or "").strip(),
+                FINANCE_CC_EMAIL,  # defined at top
+            ]
+            cc_list = [a for a in dict.fromkeys([x for x in cc_candidates if x])]
 
+            # Remove duplicates already present in To:
+            cc_list = [c for c in cc_list if c not in to_list]
 
             try:
                 mailer.compose_with_best_available(
-                    to=[to_addr],
+                    to=to_list,                 # <-- multiple recipients now
                     subject=subject,
                     body=body,
                     attachment=attachment,
-                    cc=[self.profile.get("email")] if self.profile.get("email") else None,
+                    cc=cc_list or None,
                 )
                 return [
                     "✉️ Opening your email client with the timesheet attached…",
-                    f"To: {to_addr}",
+                    f"To: {', '.join(to_list)}",
+                    (f"CC: {', '.join(cc_list)}" if cc_list else "CC: —"),
                     f"Subject: {subject}",
                     "✅ Review and hit Send.",
                 ]
@@ -432,13 +446,6 @@ class Engine:
         # ---- leave type?
         leave_type = _detect_leave_type(text)
 
-        # for k, canon in _LEAVE_SYNONYMS.items():
-        #     if re.search(rf"\b{re.escape(k)}\b", text, flags=re.I):
-        #         leave_type = canon; break
-        # if not leave_type:
-        #     for a in _ALLOWED_TYPES:
-        #         if re.search(rf"\b{re.escape(a)}\b", text, flags=re.I):
-        #             leave_type = a; break
 
         leave_details: List[Sequence] = sess.get("leave_details", [])
 

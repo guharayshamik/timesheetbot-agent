@@ -69,8 +69,10 @@ def ensure_profile() -> dict:
 
 # ------------------------------ generic helpers ------------------------------
 
+# def show_help() -> None:
+#     panels(["Type your timesheet details or use the commands shown in the help blocks."])
 def show_help() -> None:
-    panels(["Type your timesheet details or use the commands shown in the help blocks."])
+    show_govtech_help_detailed()
 
 def show_session_box() -> None:
     sess = load_session()
@@ -88,6 +90,23 @@ def _drain_stdin_nonblocking() -> None:
     except Exception:
         pass  # best effort
 
+def _normalize_engine_cmd(cmd: str) -> str:
+    """
+    Make engine commands work without a leading slash.
+    Maps: email, comment, generate  -> /email, /comment, /generate
+    Leaves other text unchanged.
+    """
+    if not cmd:
+        return cmd
+    if cmd.startswith("/"):
+        return cmd
+
+    keywords = ("email", "comment", "generate")
+    for kw in keywords:
+        if cmd == kw or cmd.startswith(f"{kw} "):
+            return f"/{cmd}"
+    return cmd
+
 
 # ------------------------------ GovTech flow ---------------------------------
 
@@ -96,7 +115,8 @@ def govtech_loop(profile: dict) -> None:
     eng.reset_session()  # start fresh so old leaves aren’t carried over
 
     banner(f"{profile.get('name')} <{profile.get('email')}>")
-    show_vibrant_help()
+    #show_vibrant_help()
+    _show_govtech_examples_compact()
     print()  # one blank line before the prompt
 
     while True:
@@ -116,24 +136,25 @@ def govtech_loop(profile: dict) -> None:
             panel("👋 Bye!")
             sys.exit(0)
 
-        if cmd == "/back":
+        if cmd in ("/back", "back"):
             panel("↩️  Back to main menu.")
             return
 
-        if cmd == "/help":
+        if cmd in ("/help", "help"):
             show_help(); continue
 
-        if cmd == "/show":
+        if cmd in ("/show", "show"):
             show_session_box(); continue
 
-        if cmd == "/clear":
+        if cmd in ("/clear", "clear"):
             clear_session(); panel("🧹 Session cleared."); continue
 
-        if cmd == "/deregister":
+        if cmd in ("/deregister", "deregister"):
             clear_profile(); clear_session()
             panel("👋 Deregistered and session cleared. Returning to main menu.")
             return
 
+        cmd = _normalize_engine_cmd(cmd)
         # Hand over to engine (includes /generate handling and /comment)
         out_lines = eng.handle_text(cmd)
         panels(out_lines)
@@ -143,6 +164,84 @@ def govtech_loop(profile: dict) -> None:
 
 def _bullet_line(s: str, style: str = "bold green") -> Text:
     return Text("• ", style="dim") + Text(s, style=style)
+
+def _show_govtech_examples_compact() -> None:
+    """Compact teaser: a few natural-language examples + a tip to type help."""
+    ex_tbl = Table.grid(padding=(0, 1))
+    ex_tbl.add_column()
+    ex_tbl.add_row(_bullet_line('"generate timesheet for August"'))
+    ex_tbl.add_row(_bullet_line('"annual leave/al 11–13 Aug"'))
+    ex_tbl.add_row(_bullet_line('"sick leave/sl/mc on 11 Aug"'))
+    ex_tbl.add_row(_bullet_line('"child care/cc on 12–13 Aug"'))
+    #ex_tbl.add_row(_bullet_line('"generate" — Create a new timesheet'))
+    ex_tbl.add_row(_bullet_line('"email" — Email generated timesheet to your registered manager'))
+    ex_tbl.add_row(_bullet_line('"help" — Show available commands'))
+    console.print(
+        Panel(
+            ex_tbl,
+            title="NLP/Commands",
+            title_align="left",
+            border_style="cyan",
+            box=box.ROUNDED,
+            padding=(0, 1),
+        )
+    )
+    console.print(
+    Panel(
+        "Type 'help' to see the full list of commands you can use for GovTech timesheets.",
+        title="Tip",
+        title_align="left",
+        border_style="magenta",
+        box=box.ROUNDED,
+        padding=(0, 1),
+    )
+)
+
+
+def show_govtech_help_detailed() -> None:
+    """Full help: natural-language commands + other command list (unchanged style)."""
+    ex_tbl = Table.grid(padding=(0, 1))
+    ex_tbl.add_column()
+
+    # Natural language / short-form intents
+    ex_tbl.add_row(_bullet_line('"generate timesheet for August"'))
+    ex_tbl.add_row(_bullet_line('"annual leave 11–13 Aug"'))
+    ex_tbl.add_row(_bullet_line('"al on 11–13 Aug"'))
+    ex_tbl.add_row(_bullet_line('"al on 11 Aug"'))
+    ex_tbl.add_row(_bullet_line('"sick leave on 11 Aug"'))
+    ex_tbl.add_row(_bullet_line('"sl on 11 Aug"'))
+    ex_tbl.add_row(_bullet_line('"mc on 11 Aug"'))
+    ex_tbl.add_row(_bullet_line('"national service on 11th aug"'))
+    ex_tbl.add_row(_bullet_line('"ns on 25 Sept"'))
+    ex_tbl.add_row(_bullet_line('"childcare leave on 12 Aug"'))
+    ex_tbl.add_row(_bullet_line('"cc on 12–13 Aug"'))
+    ex_tbl.add_row(_bullet_line('"child care on 5 Oct"'))
+    ex_tbl.add_row(_bullet_line('"childcare on 21 Sept"'))
+    ex_tbl.add_row(_bullet_line('"weekend effort on 29 Sep 4h"'))
+    ex_tbl.add_row(_bullet_line('"we 3h on 6 Oct"'))
+
+    # Other commands (unchanged style/format)
+    ex_tbl.add_row(_bullet_line('"show" — Display current saved data'))
+    ex_tbl.add_row(_bullet_line('"clear" — Clear current entries'))
+    ex_tbl.add_row(_bullet_line('"deregister" — Remove your profile from bot'))
+    ex_tbl.add_row(_bullet_line('"generate" — Create a new timesheet'))
+    ex_tbl.add_row(_bullet_line('"comment" — Add remarks to a specific date; This will add comments in the "Remarks" column inside excel'))
+    ex_tbl.add_row(_bullet_line('"email" — Email generated timesheet to your registered manager'))
+    ex_tbl.add_row(_bullet_line('"help" — Show available commands'))
+    ex_tbl.add_row(_bullet_line('"back" — Return to previous menu'))
+    ex_tbl.add_row(_bullet_line('"quit" — Exit the tool'))
+
+    console.print(
+        Panel(
+            ex_tbl,
+            title="NLP/Commands",
+            title_align="left",
+            border_style="cyan",
+            box=box.ROUNDED,
+            padding=(0, 1),
+        )
+    )
+
 
 def _show_napta_simple_help_block() -> None:
     """Pretty 'NAPTA Chat mode ON + examples + commands' block (edit features removed)."""
