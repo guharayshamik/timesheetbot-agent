@@ -30,7 +30,11 @@ def compose_outlook_mac(
         return s.replace("\\", "\\\\").replace('"', '\\"')
 
     # Build AppleScript "return" joined body (Outlook respects this once set after creation)
-    body_return_joined = '"{}"'.format('" & return & "'.join(_escape(line) for line in body.splitlines()))
+    #body_return_joined = '"{}"'.format('" & return & "'.join(_escape(line) for line in body.splitlines()))
+    # Use explicit ASCII CR (13) + LF (10) instead of "return"
+    body_return_joined = '"' + '" & (ASCII character 13) & (ASCII character 10) & "'.join(
+        _escape(line) for line in body.splitlines()
+    ) + '"'
 
     to_lines = "\n".join(
         f'make new recipient at newMsg with properties {{email address:{{address:"{_escape(addr)}"}}}}'

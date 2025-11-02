@@ -398,12 +398,12 @@ class Engine:
                 sess["recent_leave_month"] = mon
                 sess["month"] = mon
             else:
-                # allow '/comment 11 OIL' when month is known in session
+                # allow 'comment 11 OIL' when month is known in session
                 single_no_mon = _parse_single_no_month(text)
                 if single_no_mon:
                     fallback_mon = sess.get("recent_leave_month") or sess.get("month")
                     if not fallback_mon:
-                        return ["⚠️ Please include a month (e.g., `/comment 11 Sep OIL`)."]
+                        return ["⚠️ Please include a month (e.g., `comment 11 Sep OIL`)."]
                     if not _valid(single_no_mon, fallback_mon):
                         return [f"⚠️ {single_no_mon}-{fallback_mon} is not a valid date."]
                     m = re.search(rf"\b{single_no_mon}(?:st|nd|rd|th)?\b", text, flags=re.I)
@@ -413,11 +413,11 @@ class Engine:
                     sess["month"] = fallback_mon
 
             if not start_key:
-                return ["⚠️ I couldn’t find the date. Example: `/comment 11 Sep OIL`."]
+                return ["⚠️ I couldn’t find the date. Example: `comment 11 Sep OIL`."]
 
             comment = (comment or "").strip()
             if not comment:
-                return ["⚠️ I didn’t catch the comment text. Example: `/comment 11 Sep: OIL`."]
+                return ["⚠️ I didn’t catch the comment text. Example: `comment 11 Sep: OIL`."]
 
             remarks = sess.get("remarks", {})
             remarks[start_key] = comment

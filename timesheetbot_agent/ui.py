@@ -276,7 +276,7 @@ def fitnet_commands() -> None:
     ex_tbl.add_column()
     ex_tbl.add_row(_bullet_line('"mc on 11 Sep"'))
     ex_tbl.add_row(_bullet_line('"annual leave 1–3 Aug"'))
-    ex_tbl.add_row(_bullet_line('"/comment 11 Sep OIL"'))
+    ex_tbl.add_row(_bullet_line('"comment 11 Sep OIL"'))
     console.print(
         Panel(ex_tbl, title="Examples", title_align="left",
               border_style="cyan", box=box.ROUNDED, padding=(0, 1))
