@@ -1,0 +1,207 @@
+# timesheetbot_agent/config/app_config.yaml
+# Central config for Timesheet Bot (synonyms, months, separators, org, CLI/UI).
+# - Expand/modify here without touching Python code.
+# - All keys are case-insensitive at runtime (engine uses regex with re.I).
+
+leave_types:
+  synonyms:
+    # ─── Sick Leave ────────────────────────────────────────────────────────────
+    sick: Sick Leave
+    sl: Sick Leave
+    mc: Sick Leave
+    medical: Sick Leave
+    "sick leave": Sick Leave
+    sickleave: Sick Leave
+    "sic leave": Sick Leave
+    "sik leave": Sick Leave
+    sicleave: Sick Leave
+    sikcleave: Sick Leave
+    "sck lv": Sick Leave
+    "sck leave": Sick Leave
+    "scik lev": Sick Leave
+    "sik lv": Sick Leave
+    "sik lev": Sick Leave
+    "sic lv": Sick Leave
+    "scik leave": Sick Leave
+    "sikleave": Sick Leave
+    "sck sick": Sick Leave
+
+    # ─── Annual Leave ─────────────────────────────────────────────────────────
+    annual: Annual Leave
+    al: Annual Leave
+    "a/l": Annual Leave
+    ann: Annual Leave
+    anl: Annual Leave
+    vacation: Annual Leave
+    pto: Annual Leave
+    "annual leave": Annual Leave
+    annualleave: Annual Leave
+    "anual leave": Annual Leave
+    anualleave: Annual Leave
+    "ann leave": Annual Leave
+    "ann lv": Annual Leave
+    "anual lev": Annual Leave
+    "anl lv": Annual Leave
+    leave: Annual Leave         # liberal fallback
+    oil: Annual Leave
+    oli: Annual Leave
+    "annual lv": Annual Leave
+    "annual-leave": Annual Leave
+
+    # ─── Childcare Leave ──────────────────────────────────────────────────────
+    childcare: Childcare Leave
+    "child care": Childcare Leave
+    cc: Childcare Leave
+    "childcare leave": Childcare Leave
+    "child care leave": Childcare Leave
+    "chd cr lv": Childcare Leave
+    "child-cr": Childcare Leave
+    "c/ care": Childcare Leave
+
+    # ─── NS Leave ─────────────────────────────────────────────────────────────
+    ns: NS Leave
+    "n s": NS Leave
+    "ns leave": NS Leave
+    "ns lv": NS Leave
+    "national service": NS Leave
+    "national": NS Leave
+    "nastinl lev": NS Leave      # common typo for "national"
+
+    # ─── Weekend Efforts (OT on Sat/Sun) ──────────────────────────────────────
+    weekend: Weekend Efforts
+    "weekend effort": Weekend Efforts
+    "weekend efforts": Weekend Efforts
+    "weekend work": Weekend Efforts
+    "worked weekend": Weekend Efforts
+    we: Weekend Efforts
+    wknd: Weekend Efforts
+    "wknd effort": Weekend Efforts
+    "wknd efforts": Weekend Efforts
+    "week-end": Weekend Efforts
+    "wkend": Weekend Efforts
+    "wkend leave": Weekend Efforts
+    "wkend work": Weekend Efforts
+    "weekend ot": Weekend Efforts
+    "weekend overtime": Weekend Efforts
+
+    # ─── Public Holiday Efforts (OT on PH) ────────────────────────────────────
+    "public holiday effort": Public Holiday Efforts
+    "public holiday efforts": Public Holiday Efforts
+    "public holiday work": Public Holiday Efforts
+    "public holiday ot": Public Holiday Efforts
+    "public hol ot": Public Holiday Efforts
+    "ph effort": Public Holiday Efforts
+    "ph efforts": Public Holiday Efforts
+    "ph work": Public Holiday Efforts
+    "ph ot": Public Holiday Efforts
+    "ph-ot": Public Holiday Efforts
+    "ph overtime": Public Holiday Efforts
+
+    # ─── Half day ─────────────────────────────────────────────────────────────
+    "half day": Half Day
+    halfday: Half Day
+    "half-day": Half Day
+    hafday: Half Day
+    "haf day": Half Day
+    hd: Half Day
+    "1/2 day": Half Day
+    "0.5 day": Half Day
+    "halfday leave": Half Day
+    "h/day": Half Day
+
+  canonical:
+    - Sick Leave
+    - Annual Leave
+    - Childcare Leave
+    - NS Leave
+    - Weekend Efforts
+    - Public Holiday Efforts
+    - Half Day
+
+dates:
+  # Month tokens → Full month name
+  months:
+    jan: January
+    "jan.": January
+    january: January
+    feb: February
+    "feb.": February
+    february: February
+    mar: March
+    "mar.": March
+    march: March
+    apr: April
+    "apr.": April
+    april: April
+    may: May
+    jun: June
+    "jun.": June
+    june: June
+    jul: July
+    "jul.": July
+    july: July
+    aug: August
+    "aug.": August
+    august: August
+    sep: September
+    "sep.": September
+    sept: September
+    "sept.": September
+    september: September
+    oct: October
+    "oct.": October
+    october: October
+    nov: November
+    "nov.": November
+    november: November
+    dec: December
+    "dec.": December
+    december: December
+
+  # Range separators recognized by the parser (engine compiles these into a regex)
+  range_separators: ["-", "–", "—", "−", "~", "to", "until", "till", "through", "thru"]
+
+org:
+  finance_cc_email: sg-finance@palo-it.com
+
+cli:
+  # Engine-triggering commands (the CLI will auto-prefix with "/" when needed)
+  engine_keywords: ["email", "comment", "generate"]
+
+  # Command aliases that the CLI should normalize to canonical commands
+  # (These do NOT go to the engine; CLI handles them first.)
+  command_aliases:
+    help: ["hlp", "h", "?", "assist"]
+    clear: ["clr", "cln", "reset"]
+    back: ["bk"]
+    quit: ["q", "/q", "exit", "/exit"]
+    email: ["eml", "mail", "snd", "send"]
+    #comment: ["cmt", "cmnt", "remark", "rmk", "add comment"]
+    generate: ["gen", "gen ts", "genrt", "genrt ts", "genrate", "create", "create ts", "create sheet", "submit", "submit timesheet", "make timesheet"]
+    show: ["display", "status", "list"]
+    comment:
+      - cmt
+      - cmnt
+      - remark
+      - remarks       # NEW
+      - comments      # NEW
+      - comm          # NEW (optional shorthand)
+      - commt         # NEW (common typo)
+      - commetns      # NEW (your typo)
+      - rmk
+      - add comment
+
+ui:
+  # Example prompts shown in help blocks; safe for terminal rendering.
+  govtech_examples:
+    - "generate timesheet for August"
+    - "annual leave / al 11–13 Aug"
+    - "sick leave / sl / mc on 11 Aug"
+    - "child care / cc on 12–13 Aug"
+    - "comment 11 Aug OIL"
+    - "email manager@yourorg.com"
+    # Shorthand/alias discoverability
+    - "hlp    (alias for help)"
+    - "clr    (alias for clear)"
+    - "eml    (alias for email)"
+    - "gen ts (alias for generate)"

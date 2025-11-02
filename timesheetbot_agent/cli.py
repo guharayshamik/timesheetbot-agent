@@ -1,5 +1,7 @@
 # timesheetbot_agent/cli.py
 from __future__ import annotations
+from .config_loader import load_config
+
 
 import sys
 from typing import Optional
@@ -107,6 +109,42 @@ def _normalize_engine_cmd(cmd: str) -> str:
             return f"/{cmd}"
     return cmd
 
+def _normalize_command(raw: str) -> str:
+    """
+    Normalize user input using config:
+    - Map aliases to canonical commands (help/clear/back/quit/email/comment/generate/show)
+    - Auto-prefix engine commands with '/' when user omits it (email/comment/generate)
+    """
+    cfg = load_config()
+    s = (raw or "").strip()
+    if not s:
+        return s
+
+    # Split first token to check command-like words
+    parts = s.split(maxsplit=1)
+    head = parts[0].lower()
+    tail = parts[1] if len(parts) > 1 else ""
+
+    # 1) Alias map (help, clear, back, quit, email, comment, generate, show)
+    aliases = getattr(cfg.cli, "command_aliases", {}) or {}
+    canonical = None
+    for canon, alist in aliases.items():
+        if head == canon or head in (a.lower() for a in alist):
+            canonical = canon
+            break
+
+    if canonical:
+        # Reconstruct with canonical head
+        s = f"{canonical} {tail}".strip()
+        head = canonical
+
+    # 2) Auto-prefix engine commands with '/'
+    engine_cmds = set(cfg.cli.engine_keywords or [])
+    if head in engine_cmds and not s.startswith("/"):
+        s = "/" + s  # e.g., 'email bob@x' -> '/email bob@x'
+
+    return s
+
 
 # ------------------------------ GovTech flow ---------------------------------
 
@@ -129,7 +167,8 @@ def govtech_loop(profile: dict) -> None:
         if not s:
             continue
 
-        cmd = s.strip()
+       # cmd = s.strip()
+        cmd = _normalize_command(s.strip())
 
         # Core commands
         if cmd in ("/quit", "/q", "quit", "q", "/exit", "exit"):
@@ -154,7 +193,8 @@ def govtech_loop(profile: dict) -> None:
             panel("👋 Deregistered and session cleared. Returning to main menu.")
             return
 
-        cmd = _normalize_engine_cmd(cmd)
+        #cmd = _normalize_engine_cmd(cmd)
+        #cmd = _normalize_command(cmd)
         # Hand over to engine (includes /generate handling and /comment)
         out_lines = eng.handle_text(cmd)
         panels(out_lines)

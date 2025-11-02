@@ -7,112 +7,141 @@ from datetime import datetime
 from typing import List, Tuple, Optional, Dict, Any, Sequence
 
 from .storage import load_session, save_session, clear_session
-from .ph_sg import PUBLIC_HOLIDAYS  # pass PHs to the generator
+#from .ph_sg import PUBLIC_HOLIDAYS  # pass PHs to the generator
+from .config_loader import load_config, load_sg_holidays
 
-
-
-EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.I)
 
 
 log = logging.getLogger("timesheetbot_engine")
 
 # ---------- config ----------
-RANGE_SEP = r"(?:-|–|—|−|~|to|until|till|through|thru)"
 
-_MONTHS = {
-    "jan": "January", "feb": "February", "mar": "March", "apr": "April",
-    "may": "May", "jun": "June", "jul": "July", "aug": "August",
-    "sep": "September", "sept": "September", "oct": "October",
-    "nov": "November", "dec": "December",
-}
+cfg = load_config()
+EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.I)
+# RANGE_SEP = r"(?:-|–|—|−|~|to|until|till|through|thru)"
+RANGE_SEP = cfg.dates.range_regex.pattern
 
-_LEAVE_SYNONYMS = {
-    # --- Sick ---
-    "sick": "Sick Leave",
-    "mc": "Sick Leave",
-    "medical": "Sick Leave",
-    # variants / typos
-    "sick leave": "Sick Leave",
-    "sickleave": "Sick Leave",
-    "sikcleave": "Sick Leave",
-    "sicleave": "Sick Leave",
-    "sik leave": "Sick Leave",
-    "sic leave": "Sick Leave",
+PUBLIC_HOLIDAYS = load_sg_holidays()
+# MONTHS = {
+#     "jan": "January", "feb": "February", "mar": "March", "apr": "April",
+#     "may": "May", "jun": "June", "jul": "July", "aug": "August",
+#     "sep": "September", "sept": "September", "oct": "October",
+#     "nov": "November", "dec": "December",
+# }
+MONTHS = cfg.dates.months
 
-    # --- Annual ---
-    "annual": "Annual Leave",
-    "vacation": "Annual Leave",
-    "al": "Annual Leave",
-    # variants / typos
-    "annual leave": "Annual Leave",
-    "annualleave": "Annual Leave",
-    "anual leave": "Annual Leave",
-    "anualleave": "Annual Leave",
-    "ann leave": "Annual Leave",
-    "pto": "Annual Leave",
-    "leave": "Annual Leave",   # liberal
-    "oil": "Annual Leave",
-    "oli": "Annual Leave",
+LEAVE_SYNONYMS = cfg.leave.synonyms
 
-    # --- Childcare ---
-    "childcare": "Childcare Leave",
-    "cc": "Childcare Leave",
-    "childcare leave": "Childcare Leave",
-    "child care": "Childcare Leave",
-    "child care leave": "Childcare Leave",
+# LEAVE_SYNONYMS = {
+#     # --- Sick ---
+#     "sick": "Sick Leave",
+#     "mc": "Sick Leave",
+#     "medical": "Sick Leave",
+#     # variants / typos
+#     "sick leave": "Sick Leave",
+#     "sickleave": "Sick Leave",
+#     "sikcleave": "Sick Leave",
+#     "sicleave": "Sick Leave",
+#     "sik leave": "Sick Leave",
+#     "sic leave": "Sick Leave",
 
-    # --- NS ---
-    "ns": "NS Leave",
-    "national service": "NS Leave",
-    "ns leave": "NS Leave",
+#     # --- Annual ---
+#     "annual": "Annual Leave",
+#     "vacation": "Annual Leave",
+#     "al": "Annual Leave",
+#     # variants / typos
+#     "annual leave": "Annual Leave",
+#     "annualleave": "Annual Leave",
+#     "anual leave": "Annual Leave",
+#     "anualleave": "Annual Leave",
+#     "ann leave": "Annual Leave",
+#     "pto": "Annual Leave",
+#     "leave": "Annual Leave",   # liberal
+#     "oil": "Annual Leave",
+#     "oli": "Annual Leave",
 
-    # --- Weekend Efforts (OT on Sat/Sun) ---
-    "weekend": "Weekend Efforts",
-    "weekend effort": "Weekend Efforts",
-    "weekend efforts": "Weekend Efforts",
-    "weekend work": "Weekend Efforts",
-    "worked weekend": "Weekend Efforts",
-    "we": "Weekend Efforts",
-    "wknd": "Weekend Efforts",
-    "wknd effort": "Weekend Efforts",
-    "week-end": "Weekend Efforts",
+#     # --- Childcare ---
+#     "childcare": "Childcare Leave",
+#     "cc": "Childcare Leave",
+#     "childcare leave": "Childcare Leave",
+#     "child care": "Childcare Leave",
+#     "child care leave": "Childcare Leave",
 
-    # --- Public Holiday Efforts (OT on PH) ---
-    "public holiday effort": "Public Holiday Efforts",
-    "public holiday efforts": "Public Holiday Efforts",
-    "public holiday work": "Public Holiday Efforts",
-    "ph effort": "Public Holiday Efforts",
-    "ph efforts": "Public Holiday Efforts",
-    "ph work": "Public Holiday Efforts",
-    "ph ot": "Public Holiday Efforts",
-    "ph-ot": "Public Holiday Efforts",
+#     # --- NS ---
+#     "ns": "NS Leave",
+#     "national service": "NS Leave",
+#     "ns leave": "NS Leave",
 
-    # --- Half day ---
-    "half day": "Half Day",
-    "halfday": "Half Day",
-    "half-day": "Half Day",
-    "hafday": "Half Day",
-    "haf day": "Half Day",
-    "hd": "Half Day",
-    "1/2 day": "Half Day",
-}
+#     # --- Weekend Efforts (OT on Sat/Sun) ---
+#     "weekend": "Weekend Efforts",
+#     "weekend effort": "Weekend Efforts",
+#     "weekend efforts": "Weekend Efforts",
+#     "weekend work": "Weekend Efforts",
+#     "worked weekend": "Weekend Efforts",
+#     "we": "Weekend Efforts",
+#     "wknd": "Weekend Efforts",
+#     "wknd effort": "Weekend Efforts",
+#     "week-end": "Weekend Efforts",
 
-_ALLOWED_TYPES = {v for v in _LEAVE_SYNONYMS.values()} | {
-    "Sick Leave", "Annual Leave", "Childcare Leave", "NS Leave",
-    "Weekend Efforts", "Public Holiday Efforts", "Half Day",
-}
+#     # --- Public Holiday Efforts (OT on PH) ---
+#     "public holiday effort": "Public Holiday Efforts",
+#     "public holiday efforts": "Public Holiday Efforts",
+#     "public holiday work": "Public Holiday Efforts",
+#     "ph effort": "Public Holiday Efforts",
+#     "ph efforts": "Public Holiday Efforts",
+#     "ph work": "Public Holiday Efforts",
+#     "ph ot": "Public Holiday Efforts",
+#     "ph-ot": "Public Holiday Efforts",
 
-FINANCE_CC_EMAIL = "sg-finance@palo-it.com"
+#     # --- Half day ---
+#     "half day": "Half Day",
+#     "halfday": "Half Day",
+#     "half-day": "Half Day",
+#     "hafday": "Half Day",
+#     "haf day": "Half Day",
+#     "hd": "Half Day",
+#     "1/2 day": "Half Day",
+# }
+
+ALLOWED_TYPES = cfg.leave.canonical
+# ALLOWED_TYPES = {v for v in LEAVE_SYNONYMS.values()} | {
+#     "Sick Leave", "Annual Leave", "Childcare Leave", "NS Leave",
+#     "Weekend Efforts", "Public Holiday Efforts", "Half Day",
+# }
+
+# FINANCE_CC_EMAIL = "sg-finance@palo-it.com"
+FINANCE_CC_EMAIL = cfg.org.finance_cc_email
 
 # ---------- helpers ----------
 def _full_month_name(token: str) -> Optional[str]:
     t = token.strip()
     if len(t) <= 3:
-        return _MONTHS.get(t.lower())
+        return MONTHS.get(t.lower())
     cap = t.capitalize()
-    if cap in _MONTHS.values():
+    if cap in MONTHS.values():
         return cap
-    return _MONTHS.get(t[:3].lower())
+    return MONTHS.get(t[:3].lower())
+
+def _parse_single_no_month(text: str) -> Optional[int]:
+    """
+    Extract a single day number from text when no explicit month name is present.
+    Updated to escape month keys (handles dotted month forms like 'sept.').
+    """
+    m = re.search(r"\bon\s+(\d{1,2})(?:st|nd|rd|th)?\b(?!\s*[A-Za-z])", text, flags=re.I)
+    if m:
+        return _std_day(m.group(1))
+
+    # Escape month keys from config for safe regex use
+    month_keys = "|".join(re.escape(k) for k in MONTHS.keys())
+    m2 = re.search(
+        rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\b(?!\s*(?:{month_keys}))",
+        text,
+        flags=re.I,
+    )
+    if m2 and not _parse_range(text):
+        return _std_day(m2.group(1))
+    return None
+
 
 def _month_from_text(text: str) -> Optional[str]:
     m = re.search(r"\b(for|in)\s+([A-Za-z]{3,9})\b", text, flags=re.I)
@@ -185,13 +214,13 @@ def _parse_range_no_month(text: str) -> Optional[Tuple[int, int]]:
     if d1 and d2: return (min(d1, d2), max(d1, d2))
     return None
 
-def _parse_single_no_month(text: str) -> Optional[int]:
-    m = re.search(r"\bon\s+(\d{1,2})(?:st|nd|rd|th)?\b(?!\s*[A-Za-z])", text, flags=re.I)
-    if m: return _std_day(m.group(1))
-    month_keys = "|".join(_MONTHS.keys())
-    m2 = re.search(rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\b(?!\s*(?:{month_keys}))", text, flags=re.I)
-    if m2 and not _parse_range(text): return _std_day(m2.group(1))
-    return None
+# def _parse_single_no_month(text: str) -> Optional[int]:
+#     m = re.search(r"\bon\s+(\d{1,2})(?:st|nd|rd|th)?\b(?!\s*[A-Za-z])", text, flags=re.I)
+#     if m: return _std_day(m.group(1))
+#     month_keys = "|".join(MONTHS.keys())   # <- UPDATED
+#     m2 = re.search(rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\b(?!\s*(?:{month_keys}))", text, flags=re.I)
+#     if m2 and not _parse_range(text): return _std_day(m2.group(1))
+#     return None
 
 def _extract_days_list(blob: str) -> List[int]:
     parts = re.split(r"(?:\s*,\s*|\s+and\s+|\s*&\s*)", blob.strip(), flags=re.I)
@@ -222,13 +251,6 @@ def _ranges_overlap(ns: str, ne: str, os_: str, oe: str) -> bool:
     s1, m1 = _split(ns); e1, m1b = _split(ne); s2, m2 = _split(os_); e2, m2b = _split(oe)
     if m1 != m2 or m1b != m2b: return False
     return not (e1 < s2 or s1 > e2)
-
-def _find_overlap(leave_details, start: str, end: str):
-    """Return (index, existing_tuple) if any entry overlaps [start,end] in same month."""
-    for i, (s, e, t) in enumerate(leave_details):
-        if _ranges_overlap(start, end, s, e):
-            return i, (s, e, t)
-    return None, None
 
 def _find_overlap(leave_details, start: str, end: str):
     """Return (index, existing_tuple) if any entry overlaps [start,end] in same month."""
@@ -277,18 +299,16 @@ def _detect_leave_type(text: str) -> Optional[str]:
     import re
     specific_hit = None
     generic_hit = None
-    for k, canon in _LEAVE_SYNONYMS.items():
+    for k, canon in LEAVE_SYNONYMS.items():   # <- UPDATED
         if re.search(rf"\b{re.escape(k)}\b", text, flags=re.I):
             if k == "leave":
-                generic_hit = canon      # remember as fallback
-                continue                 # skip for now; try to find something specific
-            # first specific match wins (ns, sick, childcare, etc.)
+                generic_hit = canon
+                continue
             specific_hit = canon
             break
     if specific_hit:
         return specific_hit
-    # If user literally typed a full allowed type, accept that too
-    for a in _ALLOWED_TYPES:
+    for a in ALLOWED_TYPES:                    # <- UPDATED
         if re.search(rf"\b{re.escape(a)}\b", text, flags=re.I):
             return a
     return generic_hit
@@ -363,7 +383,8 @@ class Engine:
             sess["month"] = month_mentioned
 
         # ---- ADD COMMENT command
-        if re.search(r"^(?:/comment|/remark|add\s+comment|remark)\b", text, flags=re.I):
+        #if re.search(r"^(?:/comment|/remark|add\s+comment|remark)\b", text, flags=re.I):
+        if re.search(r"^(?:/(?:comment|comments)|add\s+comment|comments?|remarks?)\b", text, flags=re.I):
             start_key = None
             comment = None
 
