@@ -230,6 +230,23 @@ def _find_overlap(leave_details, start: str, end: str):
             return i, (s, e, t)
     return None, None
 
+def _find_overlap(leave_details, start: str, end: str):
+    """Return (index, existing_tuple) if any entry overlaps [start,end] in same month."""
+    for i, (s, e, t) in enumerate(leave_details):
+        if _ranges_overlap(start, end, s, e):
+            return i, (s, e, t)
+    return None, None
+
+def _find_all_overlaps(leave_details, start: str, end: str):
+    """
+    Return list of (idx, (start, end, type)) for entries that overlap [start, end] in the same month.
+    """
+    out = []
+    for i, (s, e, t) in enumerate(leave_details):
+        if _ranges_overlap(start, end, s, e):
+            out.append((i, (s, e, t)))
+    return out
+
 def _extract_comment_after(text: str, matched_span: tuple[int, int]) -> str:
     """Return everything after the matched date as the comment, stripped of separators."""
     _, end = matched_span
@@ -297,19 +314,44 @@ class Engine:
             ans = text.strip().lower()
             overlap = sess["pending_overlap"]
             if ans in ("yes", "y", "yeah", "yep", "sure"):
-                sess["leave_details"][overlap["idx"]] = overlap["new"]
-                _, new_month = _split(overlap["new"][0])
-                sess["recent_leave_month"] = new_month
-                sess["month"] = new_month
-                sess.pop("pending_overlap")
-                save_session(sess)
-                return [
-                    f"🔄 Replaced {overlap['old'][2]} {overlap['old'][0]}–{overlap['old'][1]} with {overlap['new'][2]}.",
-                    "You can add more leaves or type `/generate`.",
-                ]
+                new_tuple = overlap["new"]  # (start, end, type)
+                # Multi-overlap path
+                if "old_list" in overlap:
+                    # Remove all old entries (by index, descending so indices stay valid)
+                    for idx, _old in sorted(overlap["old_list"], key=lambda x: x[0], reverse=True):
+                        sess["leave_details"].pop(idx)
+                    # Add the single consolidated replacement
+                    sess["leave_details"].append(new_tuple)
+
+                    _, new_month = _split(new_tuple[0])
+                    sess["recent_leave_month"] = new_month
+                    sess["month"] = new_month
+                    sess.pop("pending_overlap")
+                    save_session(sess)
+
+                    old_summary = "; ".join(
+                        f"{t} {s}–{e}" for _, (s, e, t) in overlap["old_list"]
+                    )
+                    return [
+                        f"🔄 Replaced {old_summary} with {new_tuple[2]}.",
+                        "You can add more leaves or type `generate`.",
+                    ]
+                # Single-overlap path (keeps existing behavior)
+                else:
+                    sess["leave_details"][overlap["idx"]] = new_tuple
+                    _, new_month = _split(new_tuple[0])
+                    sess["recent_leave_month"] = new_month
+                    sess["month"] = new_month
+                    sess.pop("pending_overlap")
+                    save_session(sess)
+                    return [
+                        f"🔄 Replaced {overlap['old'][2]} {overlap['old'][0]}–{overlap['old'][1]} with {new_tuple[2]}.",
+                        "You can add more leaves or type `generate`.",
+                    ]
             elif ans in ("no", "n", "nope"):
                 sess.pop("pending_overlap"); save_session(sess)
                 return ["❌ Kept your original leave. Discarded the new one."]
+
 
         # ---- generate intent?
         wants_generate = bool(re.search(r"\b(generate|submit|create)\b.*\b(timesheet|sheet)\b", text, flags=re.I)) \
@@ -360,7 +402,7 @@ class Engine:
             remarks[start_key] = comment
             sess["remarks"] = remarks
             save_session(sess)
-            return [f"📝 Added remark “{comment}” for {start_key}. You can `/show` or `/generate`."]
+            return [f"📝 Added remark “{comment}” for {start_key}. You can `show` or `generate`."]
 
         # ---- EMAIL command
         if re.match(r"^/?email\b", text, flags=re.I):
@@ -369,11 +411,11 @@ class Engine:
             meta = sess_meta.get("last_generated_meta", {})  # <-- you were missing this
 
             if not path_str:
-                return ["⚠️ No generated file found. Please `/generate` the timesheet first."]
+                return ["⚠️ No generated file found. Please `generate` the timesheet first."]
 
             attachment = Path(path_str)
             if not attachment.exists():
-                return [f"⚠️ I can't find the file on disk: {attachment}. Please `/generate` again."]
+                return [f"⚠️ I can't find the file on disk: {attachment}. Please `generate` again."]
 
 
             # --- parse recipients (supports multiple) ---
@@ -489,7 +531,7 @@ class Engine:
                 leave_details.append((start, start, leave_type)); recorded.append(start)
             sess["leave_details"] = leave_details; sess["recent_leave_month"] = mon; sess["month"] = mon
             save_session(sess)
-            return [f"✅ Recorded {leave_type} on {', '.join(recorded)}.", "You can add more or type `/generate`."]
+            return [f"✅ Recorded {leave_type} on {', '.join(recorded)}.", "You can add more or type `generate`."]
 
         # ---- range
         if leave_type and date_range:
@@ -497,13 +539,23 @@ class Engine:
             if not _valid(d1, m1): return [f"⚠️ {d1}-{m1} is not a valid date."]
             if not _valid(d2, m2): return [f"⚠️ {d2}-{m2} is not a valid date."]
             start = _fmt(d1, m1); end = _fmt(d2, m2)
-            idx, existing = _find_overlap(leave_details, start, end)
-            if existing:
-                sess["pending_overlap"] = {"new": (start, end, leave_type), "old": existing, "idx": idx}
+
+            overlaps = _find_all_overlaps(leave_details, start, end)
+            if overlaps:
+                # Summarize all overlaps for a single confirmation
+                kinds = ", ".join(sorted({t for _, (_, _, t) in overlaps}))
+                old_summary = "; ".join(f"{t} {s}–{e}" for _, (s, e, t) in overlaps)
+                sess["pending_overlap"] = {
+                    "new": (start, end, leave_type),
+                    "old_list": overlaps,   # list[(idx, (s,e,t))]
+                }
                 save_session(sess)
-                return [f"⚠️ {start}–{end} already has {existing[2]}. Replace with {leave_type}? (yes/no)"]
+                return [f"⚠️ {start}–{end} overlaps existing: {old_summary}. Replace all with {leave_type}? (yes/no)"]
+
             leave_details.append((start, end, leave_type))
-            sess["leave_details"] = leave_details; sess["recent_leave_month"] = m1; sess["month"] = m1
+            sess["leave_details"] = leave_details
+            sess["recent_leave_month"] = m1
+            sess["month"] = m1
             save_session(sess)
             return [f"✅ Recorded {leave_type} from {start} to {end}."]
 
@@ -557,7 +609,7 @@ class Engine:
                 leave_details.append((start, start, leave_type)); recorded.append(start)
             sess["leave_details"] = leave_details; sess["recent_leave_month"] = fallback_mon; sess["month"] = fallback_mon
             save_session(sess)
-            return [f"✅ Recorded {leave_type} on {', '.join(recorded)}.", "You can add more or type `/generate`."]
+            return [f"✅ Recorded {leave_type} on {', '.join(recorded)}.", "You can add more or type `generate`."]
 
         # ---- generate
         if wants_generate:
@@ -591,7 +643,7 @@ class Engine:
                     sess["leave_details"] = leave_details
                     _, mon = _split(p["start_date"]); sess["recent_leave_month"] = mon; sess["month"] = mon
                     save_session(sess)
-                    return [f"✅ Recorded {p['leave_type']} on {p['start_date']}.", "You can add more or type `/generate`."]
+                    return [f"✅ Recorded {p['leave_type']} on {p['start_date']}.", "You can add more or type `generate`."]
             elif ans in ("no", "n", "nope"):
                 sess.pop("pending_leave", None); sess.pop("awaiting_confirmation", None); save_session(sess)
                 return ["❌ Okay, cancelled. Please rephrase your leave request."]
@@ -604,8 +656,8 @@ class Engine:
                 f"- generate timesheet for {current_month}",
                 f"- annual leave 11–13 {current_month[:3]}",
                 f"- sick leave on 10 {current_month[:3]}",
-                f"- /comment 11 {current_month[:3]} OIL",
-                f"- /email manager@yourorg.com",
+                f"- comment 11 {current_month[:3]} OIL",
+                f"- email manager@yourorg.com",
             ]
         else:
             return [
@@ -613,7 +665,7 @@ class Engine:
                 "- generate timesheet for September",
                 "- annual leave 11–13 Sep",
                 "- sick leave on 10 Sep",
-                "- /comment 11 Sep OIL",
+                "- comment 11 Sep OIL",
                 "⚠️ Please mention the month along with the date (e.g., 10th June).",
             ]
 
