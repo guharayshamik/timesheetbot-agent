@@ -17,6 +17,15 @@ from .ui import (
     show_vibrant_help,
 )
 
+from .storage import (
+    clear_session,
+    clear_profile,
+    clear_napta,
+    clear_generated,
+    clear_all,
+    clear_govtech_only, 
+)
+
 # Napta
 from .napta import NaptaClient
 
@@ -145,6 +154,143 @@ def _normalize_command(raw: str) -> str:
 
     return s
 
+# ------------------------------ Forget / Reset helper ---------------------------------
+
+def _confirm(prompt: str) -> bool:
+    """Ask the user to type yes/no and return True only on yes."""
+    ans = input_prompt(f"{prompt} (yes/no)").strip().lower()
+    return ans in ("y", "yes")
+
+def handle_forget_command(text: str, *, flow: str | None = None, napta_client=None):
+    """
+    Intercepts 'forget …' or 'reset …' commands and performs local cleanup.
+    Returns list[str] messages if handled, or None if not a forget/reset command.
+
+    flow: 'govtech' | 'napta' | None  (controls which commands are allowed)
+    """
+    t = (text or "").strip().lower()
+    if not (t.startswith("forget") or t.startswith("reset") or t in ("factory reset", "reset everything")):
+        return None
+
+    # normalize to simpler keys
+    key = t.replace("really ", "").strip()
+
+    # ---------- Hard blocks / flow scoping ----------
+    if flow == "govtech":
+        if key in ("reset napta", "forget napta"):
+            return [
+                "⛔ That command is only available in Napta flow.",
+                "If you want to clear GovTech data (profile, session, registration details, settings), type: `reset my data`.",
+                "For a full wipe including generated files, type: `factory reset`.",
+            ]
+        if key == "reset":
+            return [
+                "❗ Ambiguous command.",
+                "To clear GovTech data like profile, session, and settings, type: `reset all my data` or `reset my data`.",
+            ]
+
+    if flow == "napta":
+        if key in ("reset my data", "reset all my data", "forget profile", "reset profile", "forget session", "reset session"):
+            return [
+                "⛔ GovTech data resets aren’t available inside Napta flow.",
+                "To clear Napta session/cache only, type: `reset napta`.",
+                "For a full wipe including generated files, type: `factory reset`.",
+            ]
+        if key == "reset":
+            return [
+                "❗ Ambiguous command.",
+                "If you want to clear Napta data (saved session, cookies, screenshots), type: `reset napta`.",
+            ]
+
+    # Session-only (GovTech working memory)
+    if key in ("forget", "forget session", "reset timesheet data"):
+        if flow == "napta":
+            return [
+                "⛔ GovTech session reset isn’t available in Napta flow.",
+                "Use `reset napta` to clear only Napta data here.",
+            ]
+        if _confirm("This will clear your GovTech in-progress session"):
+            clear_session()
+            return ["🧹 Cleared session data."]
+        return ["❌ Cancelled. ✅ No changes made."]
+
+    # Registration profile
+    if key in ("forget profile", "deregister", "reset profile"):
+        if flow == "napta":
+            return [
+                "⛔ GovTech profile reset isn’t available in Napta flow.",
+                "Use `reset napta` for Napta data, or run this from GovTech flow.",
+            ]
+        if _confirm("This will remove your GovTech registration/profile"):
+            clear_profile()
+            return ["🧹 Cleared registration/profile info."]
+        return ["❌ Cancelled. ✅ No changes made."]
+
+    # Napta cache/state
+    if key in ("forget napta", "reset napta"):
+        if flow == "govtech":
+            return [
+                "⛔ Napta reset is only available in Napta flow.",
+                "Switch to Napta and type: `reset napta`.",
+            ]
+        if _confirm("This will remove Napta session/cache (storage state, cookies, screenshots)"):
+            clear_napta()
+            # important: tear down the live browser/context so next command reloads fresh state
+            try:
+                if napta_client is not None and hasattr(napta_client, "close"):
+                    napta_client.close()
+            except Exception:
+                pass
+            return ["🧹 Cleared Napta browser/session data."]
+        return ["❌ Cancelled. No changes made."]
+
+
+    # Generated files only
+    if key in ("forget generated", "reset generated", "reset timesheet files"):
+        if _confirm("This will delete ALL generated timesheet files"):
+            clear_generated()
+            return ["🧹 Removed all generated timesheet files."]
+        return ["❌ Cancelled. ✅ No changes made."]
+
+    # Flow-scoped safe reset
+    if key in ("reset my data", "reset all my data", "reset all data", "forget all"):
+        if flow == "napta":
+            return [
+                "⛔ GovTech reset isn’t available in Napta flow.",
+                "To clear only Napta data, type: `reset napta`.",
+                "For a full wipe, type: `factory reset`.",
+            ]
+        if _confirm("This will clear your GovTech profile, session, and settings (keeps Napta and generated files)"):
+            clear_govtech_only()
+            return [
+                "🧼 Cleared GovTech data (profile, session, settings).",
+                "✅ Napta data and generated timesheets are not cleared.",
+            ]
+        return ["❌ Cancelled. ✅ No changes made."]
+
+    # Full factory reset (including generated files)
+    if key in ("forget really all", "factory reset", "reset everything"):
+        if _confirm("This will WIPE ALL data, including generated files"):
+            clear_all(preserve_generated=False)
+            return ["⚠️ Performed FULL reset — all data, including generated files, deleted."]
+        return ["❌ Cancelled. ✅ No changes made."]
+
+    # Flow-specific unknowns
+    if flow == "govtech":
+        return [
+            "ℹ️ Unknown reset/forget command.",
+            "GovTech tips: `reset my data` (clears profile/session/settings), `reset profile`, `reset generated`, or `factory reset`.",
+        ]
+    if flow == "napta":
+        return [
+            "ℹ️ Unknown reset/forget command.",
+            "Napta tips: `reset napta` (clears Napta session/cache), or `factory reset` to wipe EVERYTHING.",
+        ]
+    return [
+        "ℹ️ Unknown reset/forget command.",
+        "Try: `forget session`, `forget profile`, `forget napta`, `forget generated`, `reset my data`, or `factory reset`.",
+    ]
+
 
 # ------------------------------ GovTech flow ---------------------------------
 
@@ -170,6 +316,31 @@ def govtech_loop(profile: dict) -> None:
        # cmd = s.strip()
         cmd = _normalize_command(s.strip())
 
+        # 🧹 Intercept forget commands (use RAW input so 'reset' isn't aliased to 'reset session')
+        reply = handle_forget_command(s.strip().lower(), flow="govtech")
+        if reply is not None:
+            for line in reply:
+                panel(line)
+            # live-refresh profile/engine so we don't use stale data after resets
+            from .storage import load_profile as _lp
+            new_prof = _lp() or {}
+            if not new_prof:
+                panel("🧾 No registration found after reset.")
+                # Ask the user if they want to register now; otherwise return to main menu
+                yn = input_prompt("Register now? (yes/no)").strip().lower()
+                if yn in ("y", "yes"):
+                    new_prof = run_registration_interactive()
+                    eng = Engine(new_prof)
+                    continue
+                else:
+                    panel("↩️ Returning to main menu. You can register later via 'Registration' or the next time you open GovTech.")
+                    return  # exit govtech_loop back to main menu
+            # If we have a profile, rebind the engine and continue
+            eng = Engine(new_prof)
+            continue
+
+
+
         # Core commands
         if cmd in ("/quit", "/q", "quit", "q", "/exit", "exit"):
             panel("👋 Bye!")
@@ -185,19 +356,26 @@ def govtech_loop(profile: dict) -> None:
         if cmd in ("/show", "show"):
             show_session_box(); continue
 
-        if cmd in ("/clear", "clear"):
+        if cmd in ("/clear", "clear", "cln", "clr"):
             clear_session(); panel("🧹 Session cleared."); continue
+
 
         if cmd in ("/deregister", "deregister"):
             clear_profile(); clear_session()
             panel("👋 Deregistered and session cleared. Returning to main menu.")
             return
+        
 
-        #cmd = _normalize_engine_cmd(cmd)
-        #cmd = _normalize_command(cmd)
-        # Hand over to engine (includes /generate handling and /comment)
+        # Keep engine profile in sync with disk on every turn
+        try:
+            from .storage import load_profile as _lp
+            eng.profile = _lp() or eng.profile
+        except Exception:
+            pass
+        # Hand over to engine
         out_lines = eng.handle_text(cmd)
         panels(out_lines)
+
 
 
 # ------------------------------ Napta (chat) ---------------------------------
@@ -218,6 +396,8 @@ def _show_govtech_examples_compact() -> None:
     #ex_tbl.add_row(_bullet_line('"generate" — Create a new timesheet'))
     ex_tbl.add_row(_bullet_line('"email/eml" — Email generated timesheet to your registered manager'))
     ex_tbl.add_row(_bullet_line('"help/h/hlp" — Show available commands'))
+    ex_tbl.add_row(_bullet_line('"factory reset" — Wipe ALL data including generated files'))
+
     console.print(
         Panel(
             ex_tbl,
@@ -273,6 +453,11 @@ def show_govtech_help_detailed() -> None:
     ex_tbl.add_row(_bullet_line('"help/h/hlp" — Show available commands'))
     ex_tbl.add_row(_bullet_line('"back" — Return to previous menu'))
     ex_tbl.add_row(_bullet_line('"quit/q" — Exit the tool'))
+    # Reset / Forget (GovTech + global)
+    ex_tbl.add_row(_bullet_line('"reset profile" — Clear registration (re-register next time)'))
+    ex_tbl.add_row(_bullet_line('"reset generated" — Delete generated timesheet files only'))
+    ex_tbl.add_row(_bullet_line('"reset my data" — Clear GovTech profile/session/settings (keeps Napta & generated)'))
+    ex_tbl.add_row(_bullet_line('"factory reset" / "reset everything" — Wipe ALL data including generated files'))
 
     console.print(
         Panel(
@@ -310,6 +495,20 @@ def _show_napta_simple_help_block() -> None:
         Panel(ex_tbl, title="Examples", title_align="left", border_style="cyan", box=box.ROUNDED, padding=(0, 1))
     )
 
+    maint = Text("\n".join([
+        "reset/forget napta   — Clear Napta session/cache (forces re-login)"
+    ]), style="bold yellow")
+    console.print(
+        Panel(
+            maint,
+            title="Maintenance (Napta)",
+            title_align="left",
+            border_style="yellow",
+            box=box.ROUNDED,
+            padding=(0, 1),
+        )
+    )
+
     # Commands — one per line
     cmds = Text(
         "\n".join([
@@ -332,7 +531,7 @@ def _show_napta_simple_help_block() -> None:
 
 
 def napta_loop(profile: dict) -> None:
-    banner(f"{profile.get('name')} <{profile.get('email')}>")
+    banner("Napta Timesheet")
 
     client = NaptaClient()
     panel(f"Napta auth status: {client.status()}")
@@ -346,16 +545,7 @@ def napta_loop(profile: dict) -> None:
         "Just ‘login’ once.",
         border_style="white", box=box.ROUNDED,
     ))
-    # console.print(Panel(
-    #     "If headless login/save/submit fails, open https://app.napta.io once and sign in, then retry.",
-    #     border_style="white", box=box.ROUNDED,
-    # ))
-    # console.print(Panel(
-    #     "Performance tip: Using a VPN can slow down Napta actions (page loads, navigation, submit) due to latency. "
-    #     "For the fastest results, run this tool **without VPN** when possible, then reconnect after you’re done.",
-    #     border_style="yellow",
-    #     box=box.ROUNDED,
-    # ))
+
     console.print(Panel(Text(
     "🚀 Performance Tip: Using a VPN can slow down Napta actions (page loads, navigation, submit). "
     "For best speed, run this tool WITHOUT VPN, then reconnect when done.",
@@ -375,6 +565,14 @@ def napta_loop(profile: dict) -> None:
 
         cmd = raw.strip().lower()
 
+        # 🧹 Intercept forget commands
+        reply = handle_forget_command(cmd, flow="napta", napta_client=client)
+
+        if reply is not None:
+            for line in reply:
+                panel(line)
+            continue
+
         # Generic exits
         if cmd in ("/quit", "/q", "quit", "q", "/exit", "exit"):
             panel("👋 Bye!")
@@ -386,7 +584,16 @@ def napta_loop(profile: dict) -> None:
 
         # ---------- Allowed simple commands only ----------
         if cmd in ("login", "/login"):
-            ok, msg = client.login(); panel(_maybe_add_shot_hint(msg)); continue
+            ok, msg = client.login()
+            panel(_maybe_add_shot_hint(msg))
+            if ok:
+                # force a fresh browser/context that reads the newly saved storage_state
+                try:
+                    client.close()
+                except Exception:
+                    pass
+            continue
+
 
         if cmd in ("view", "/view", "show", "/show"):
             ok, msg = client.view_week("current"); panel(_maybe_add_shot_hint(msg)); continue
@@ -417,6 +624,7 @@ def napta_loop(profile: dict) -> None:
         )
 
 
+
 # ------------------------------ main menu ------------------------------------
 
 def main(argv: Optional[list] = None) -> int:
@@ -435,7 +643,11 @@ def main(argv: Optional[list] = None) -> int:
         elif choice == "2":
             run_registration_interactive()        # Registration second
         elif choice == "3":
-            profile = ensure_profile()
+            # Napta does NOT require GovTech registration
+            try:
+                profile = load_profile() or {}
+            except Exception:
+                profile = {}
             napta_loop(profile)                   # Napta third
         elif choice == "4":
             panel("Goodbye! 👋")

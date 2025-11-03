@@ -169,3 +169,72 @@ def upsert_session_field(key: str, value: Any) -> Dict[str, Any]:
     s[key] = value
     save_session(s)
     return s
+
+
+# ---------- forget / cleanup helpers ----------
+
+def clear_napta() -> None:
+    """Delete the Napta folder (~/.tsbot/napta)."""
+    napta_dir = get_app_dir() / "napta"
+    if napta_dir.exists():
+        try:
+            import shutil
+            shutil.rmtree(napta_dir)
+        except Exception as e:
+            logger.warning(f"[storage] failed to remove napta dir: {e}")
+
+
+def clear_generated() -> None:
+    """Delete the generated_timesheets folder."""
+    gen_dir = get_generated_dir()
+    if gen_dir.exists():
+        try:
+            import shutil
+            shutil.rmtree(gen_dir)
+        except Exception as e:
+            logger.warning(f"[storage] failed to remove generated dir: {e}")
+
+
+def clear_misc_state() -> None:
+    """Remove misc state files like fitnet_state, etc."""
+    misc_files = [
+        "state.json",
+        "fitnet_state.json",
+        "fitnet_storage_state.json",
+        "settings.json",
+    ]
+    for name in misc_files:
+        path = get_app_dir() / name
+        if path.exists():
+            try:
+                path.unlink()
+            except Exception as e:
+                logger.warning(f"[storage] failed to remove {name}: {e}")
+
+def clear_govtech_only() -> None:
+    """
+    Clear only GovTech-related data:
+      - profile.json (registration)
+      - session.json (GovTech working memory)
+      - misc state (fitnet_state.json, fitnet_storage_state.json, settings.json, state.json)
+    Does NOT touch:
+      - ~/.tsbot/napta
+      - generated_timesheets/
+    """
+    clear_session()
+    clear_profile()
+    clear_misc_state()
+
+
+
+def clear_all(*, preserve_generated: bool = True) -> None:
+    """
+    Wipe all app data under ~/.tsbot/.
+    Keeps generated_timesheets by default unless preserve_generated=False.
+    """
+    clear_session()
+    clear_profile()
+    clear_misc_state()
+    clear_napta()
+    if not preserve_generated:
+        clear_generated()

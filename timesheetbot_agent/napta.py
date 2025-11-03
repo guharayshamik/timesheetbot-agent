@@ -696,7 +696,12 @@ class NaptaClient:
             if self._browser: self._browser.close()
         with suppress_exc():
             if self._p: self._p.stop()
-        self._p = self._browser = self._ctx = self._page = None
+        # drop references so a fresh context is created next time
+        self._p = None
+        self._browser = None
+        self._ctx = None
+        self._page = None
+
 
     def close(self):
         self._shutdown()

@@ -206,6 +206,27 @@ def show_vibrant_help() -> None:
         )
     )
 
+    # --- Maintenance / Reset (GovTech) ---
+    reset_text = Text("\n".join([
+        "reset profile      — Remove saved registration (name, emails, etc.)",
+        "reset generated    — Delete all generated timesheet files",
+        "factory reset      — Wipe ALL data, including generated files",
+    ]), style="bold yellow")
+
+
+
+    console.print(
+        Panel(
+            reset_text,
+            title="Maintenance / Reset",
+            title_align="left",
+            border_style="yellow",
+            box=ROUNDED,
+            padding=(0, 1),
+        )
+    )
+
+
     # Keep the existing commands strip if you like
     cmds = Text(
         "show   clear   deregister   generate   comment   help   back   email   quit",

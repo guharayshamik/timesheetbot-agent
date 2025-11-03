@@ -172,7 +172,7 @@ cli:
   # (These do NOT go to the engine; CLI handles them first.)
   command_aliases:
     help: ["hlp", "h", "?", "assist"]
-    clear: ["clr", "cln", "reset"]
+    clear: ["clr", "cln"]
     back: ["bk"]
     quit: ["q", "/q", "exit", "/exit"]
     email: ["eml", "mail", "snd", "send"]
@@ -190,6 +190,7 @@ cli:
       - commetns      
       - rmk
       - add comment
+    forget: ["reset"]
 
 ui:
   # Example prompts shown in help blocks; safe for terminal rendering.
@@ -205,3 +206,6 @@ ui:
     - "clr    (alias for clear)"
     - "eml    (alias for email)"
     - "gen ts (alias for generate)"
+    - "reset session    (reset current GovTech flow)"
+    - "reset napta      (clear Napta session/cache)"
+    - "factory reset    (wipe ALL data incl. generated)"
