@@ -12,9 +12,33 @@ from rich.text import Text
 from rich import box
 from rich.box import ROUNDED
 from .config_loader import load_config
+from contextlib import contextmanager 
 
 console = Console()
 BORDER = "bright_blue"
+
+# Centralized user-cancel (Ctrl-C) handling
+class UserCancelled(Exception):
+    """Semantic cancel (Ctrl-C / EOF) raised by input_prompt/menu according to active policy."""
+    pass
+
+# Policy stack; default at top-level is "exit"
+_POLICY_STACK = ["exit"]  # values: "exit" or "back"
+
+@contextmanager
+def interrupt_policy(policy: str):
+    """Use 'back' inside flows so Ctrl-C returns to previous menu; 'exit' at main menu."""
+    if policy not in ("back", "exit"):
+        raise ValueError("policy must be 'back' or 'exit'")
+    _POLICY_STACK.append(policy)
+    try:
+        yield
+    finally:
+        _POLICY_STACK.pop()
+
+def _current_policy() -> str:
+    return _POLICY_STACK[-1] if _POLICY_STACK else "exit"
+
 
 # ---------- Backspace/Delete fix (GNU readline & macOS libedit) ----------
 def _fix_backspace_delete() -> None:
@@ -96,22 +120,25 @@ def input_prompt(prompt_text: str = "›", *, highlight_typed: bool = False) -> 
     - Falls back to Rich Prompt.ask otherwise; we re-apply the
       readline/libedit fix so Backspace/Delete always work.
     """
-    if HAVE_PTK and not _event_loop_running():
-        style = PTKStyle.from_dict({
-            "prompt": "bold cyan",
-            "": "bold white" if highlight_typed else "",  # style for typed characters
-        })
-        return pt_prompt(
-            [("class:prompt", f"{prompt_text} ")],
-            style=style,
-            history=_TSBOT_HISTORY,
-            auto_suggest=AutoSuggestFromHistory(),
-            key_bindings=_kb,
-        )
-    else:
-        # Ensure erase keys behave correctly in fallback too
-        _fix_backspace_delete()
-        return Prompt.ask(f"[bold cyan]{prompt_text}[/]")
+    try:
+        if HAVE_PTK and not _event_loop_running():
+            style = PTKStyle.from_dict({
+                "prompt": "bold cyan",
+                "": "bold white" if highlight_typed else "",
+            })
+            return pt_prompt(
+                [("class:prompt", f"{prompt_text} ")],
+                style=style,
+                history=_TSBOT_HISTORY,
+                auto_suggest=AutoSuggestFromHistory(),
+                key_bindings=_kb,
+            )
+        else:
+            _fix_backspace_delete()
+            return Prompt.ask(f"[bold cyan]{prompt_text}[/]")
+    except (KeyboardInterrupt, EOFError):
+        # Map to semantic cancel per active policy
+        raise UserCancelled()
 
 # ── Top banner ──────────────────────────────────────────────────────────────────
 def banner(profile_line: str) -> None:
@@ -141,12 +168,15 @@ def menu(title: str, options: list[str]) -> str:
     for i, label in enumerate(options, start=1):
         table.add_row(f"[cyan]{i}[/]", label)
     console.print(Panel.fit(table, title=title, border_style=BORDER, box=ROUNDED))
-    return Prompt.ask(
-        f"[bold]Enter choice[/] (1–{len(options)})",
-        choices=[str(i) for i in range(1, len(options) + 1)],
-        show_choices=False,
-    )
-
+    try:
+        return Prompt.ask(
+            f"[bold]Enter choice[/] (1–{len(options)})",
+            choices=[str(i) for i in range(1, len(options) + 1)],
+            show_choices=False,
+        )
+    except (KeyboardInterrupt, EOFError):
+        raise UserCancelled()
+    
 # ── Message panels ──────────────────────────────────────────────────────────────
 def panel(msg: str) -> None:
     """Pretty-print a single message in a colored box based on its emoji/severity."""

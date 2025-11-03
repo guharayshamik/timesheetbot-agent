@@ -15,6 +15,8 @@ from .ui import (
     panel,
     panels,
     show_vibrant_help,
+    interrupt_policy,    
+    UserCancelled,    
 )
 
 from .storage import (
@@ -327,14 +329,22 @@ def govtech_loop(profile: dict) -> None:
             if not new_prof:
                 panel("🧾 No registration found after reset.")
                 # Ask the user if they want to register now; otherwise return to main menu
-                yn = input_prompt("Register now? (yes/no)").strip().lower()
+                try:
+                    yn = input_prompt("Register now? (yes/no)").strip().lower()
+                except UserCancelled:
+                    panel("↩️ Returning to main menu.")
+                    return
                 if yn in ("y", "yes"):
                     new_prof = run_registration_interactive()
+                    if not new_prof:
+                        panel("↩️ Returning to main menu.")
+                        return
                     eng = Engine(new_prof)
                     continue
                 else:
-                    panel("↩️ Returning to main menu. You can register later via 'Registration' or the next time you open GovTech.")
-                    return  # exit govtech_loop back to main menu
+                    panel("↩️ Returning to main menu. ...")
+                    return
+                # exit govtech_loop back to main menu
             # If we have a profile, rebind the engine and continue
             eng = Engine(new_prof)
             continue
@@ -629,31 +639,39 @@ def napta_loop(profile: dict) -> None:
 
 def main(argv: Optional[list] = None) -> int:
     banner("CLI Tool")
-    while True:
-        choice = menu("Choose an option:", [
-        "GovTech Timesheet",
-        "Registration (GovTech entries)",
-        "Napta Timesheet",
-        "Quit",
-    ])
+    try:
+        while True:
+            choice = menu("Choose an option:", [
+            "GovTech Timesheet",
+            "Registration (GovTech entries)",
+            "Napta Timesheet",
+            "Quit",
+        ])
 
-        if choice == "1":
-            profile = ensure_profile()
-            govtech_loop(profile)                 # GovTech first
-        elif choice == "2":
-            run_registration_interactive()        # Registration second
-        elif choice == "3":
-            # Napta does NOT require GovTech registration
-            try:
-                profile = load_profile() or {}
-            except Exception:
-                profile = {}
-            napta_loop(profile)                   # Napta third
-        elif choice == "4":
-            panel("Goodbye! 👋")
-            return 0
-        else:
-            panel("Please pick 1–4.")
+            if choice == "1":
+                profile = ensure_profile()
+                if not profile:
+                    panel("↩️ Returning to main menu.")
+                    continue
+                govtech_loop(profile)   
+            elif choice == "2":
+                run_registration_interactive()        # Registration second
+            elif choice == "3":
+                # Napta does NOT require GovTech registration
+                try:
+                    profile = load_profile() or {}
+                except Exception:
+                    profile = {}
+                napta_loop(profile)                   # Napta third
+            elif choice == "4":
+                panel("Goodbye! 👋")
+                return 0
+            else:
+                panel("Please pick 1–4.")
+    except UserCancelled:
+        panel("👋 Bye!")
+        return 0
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

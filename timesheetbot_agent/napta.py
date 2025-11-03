@@ -481,6 +481,15 @@ def _verbatim_grid(tbl, day_cols):
     # number of weekday columns we want to render (Mon..Fri or Mon..Sun)
     day_count = max(0, len(day_cols))
 
+    # def _txt(loc):
+    #     s = ""
+    #     with suppress_exc():
+    #         s = (loc.evaluate("el => el.textContent") or "").strip()
+    #     if not s:
+    #         with suppress_exc():
+    #             s = (loc.inner_text() or "").strip()
+    #     return " ".join((s or "").split())
+
     def _txt(loc):
         s = ""
         with suppress_exc():
@@ -488,7 +497,17 @@ def _verbatim_grid(tbl, day_cols):
         if not s:
             with suppress_exc():
                 s = (loc.inner_text() or "").strip()
-        return " ".join((s or "").split())
+        if not s:
+            # Some Napta cells carry values only in aria-label (or nested spans)
+            with suppress_exc():
+                s = (loc.get_attribute("aria-label") or "").strip()
+        s = " ".join((s or "").split())
+        # normalize variants like "1 d", "1 day", "1 Day" → "1d"
+        m = re.search(r"(\d+)\s*d", s, flags=re.I)
+        if m:
+            return f"{m.group(1)}d"
+        return s
+
 
     # Helper: post-process the values scraped after the project column
     def _sanitize_values(values, proj):
@@ -508,11 +527,16 @@ def _verbatim_grid(tbl, day_cols):
             values = values[:day_count]
 
         # 3) Clip/pad to the expected weekday count
+                # 3) Clip/pad to the expected weekday count
         if len(values) > day_count:
             values = values[:day_count]
         elif len(values) < day_count:
             values = values + [""] * (day_count - len(values))
+
+        # 4) Final normalization: blank → "0d"
+        values = [v if (v and v.strip()) else "0d" for v in values]
         return values
+
 
     # ───────── Native <table> ─────────
     body_rows = tbl.locator("tbody tr")
