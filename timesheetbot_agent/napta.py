@@ -481,15 +481,6 @@ def _verbatim_grid(tbl, day_cols):
     # number of weekday columns we want to render (Mon..Fri or Mon..Sun)
     day_count = max(0, len(day_cols))
 
-    # def _txt(loc):
-    #     s = ""
-    #     with suppress_exc():
-    #         s = (loc.evaluate("el => el.textContent") or "").strip()
-    #     if not s:
-    #         with suppress_exc():
-    #             s = (loc.inner_text() or "").strip()
-    #     return " ".join((s or "").split())
-
     def _txt(loc):
         s = ""
         with suppress_exc():
@@ -497,17 +488,7 @@ def _verbatim_grid(tbl, day_cols):
         if not s:
             with suppress_exc():
                 s = (loc.inner_text() or "").strip()
-        if not s:
-            # Some Napta cells carry values only in aria-label (or nested spans)
-            with suppress_exc():
-                s = (loc.get_attribute("aria-label") or "").strip()
-        s = " ".join((s or "").split())
-        # normalize variants like "1 d", "1 day", "1 Day" → "1d"
-        m = re.search(r"(\d+)\s*d", s, flags=re.I)
-        if m:
-            return f"{m.group(1)}d"
-        return s
-
+        return " ".join((s or "").split())
 
     # Helper: post-process the values scraped after the project column
     def _sanitize_values(values, proj):
@@ -527,27 +508,52 @@ def _verbatim_grid(tbl, day_cols):
             values = values[:day_count]
 
         # 3) Clip/pad to the expected weekday count
-                # 3) Clip/pad to the expected weekday count
         if len(values) > day_count:
             values = values[:day_count]
         elif len(values) < day_count:
             values = values + [""] * (day_count - len(values))
-
-        # 4) Final normalization: blank → "0d"
-        values = [v if (v and v.strip()) else "0d" for v in values]
         return values
 
-
-    # ───────── Native <table> ─────────
+    # ───────── Native <table> (alternate “control/value” cells) ─────────
     body_rows = tbl.locator("tbody tr")
     if body_rows.count():
+        import re
+
+        def _read_cell_number(cell):
+            # 1) prefer the hidden number input’s value
+            with suppress_exc():
+                inp = cell.locator("input[type='number']").first
+                if inp.count():
+                    v = (inp.get_attribute("value") or "").strip()
+                    if v:
+                        return f"{float(v):g}d"
+            # 2) fallback: visible text (ignore aria-hidden)
+            with suppress_exc():
+                el = cell.locator(
+                    "p:not([aria-hidden='true']),"
+                    "span:not([aria-hidden='true']),"
+                    "div:not([aria-hidden='true'])"
+                ).first
+                if el.count():
+                    t = (el.inner_text() or "").strip()
+                    m = re.search(r"\d+(?:\.\d+)?", t)
+                    if m:
+                        return f"{float(m.group(0)):g}d"
+            # 3) last resort: raw inner text
+            with suppress_exc():
+                raw = (cell.inner_text() or "").strip()
+                m = re.search(r"\d+(?:\.\d+)?", raw)
+                if m:
+                    return f"{float(m.group(0)):g}d"
+            return "0d"
+
         for rix in range(body_rows.count()):
             r = body_rows.nth(rix)
             tds = r.locator("td")
-            if not tds.count():
+            if tds.count() < 3:
                 continue
 
-            # Project: first column
+            # Project = first td
             proj = _txt(tds.nth(0))
             if not proj:
                 with suppress_exc():
@@ -557,11 +563,18 @@ def _verbatim_grid(tbl, day_cols):
             if not proj:
                 continue
 
-            # Day cells: everything after the first column, in DOM order
-            values = [_txt(tds.nth(i)) for i in range(1, tds.count())]
+            # Values = every 2nd td starting at index 2 (0-based):
+            # indices: 2,4,6,8,10 → Mon..Fri; ignore totals and anything after.
+            day_count = max(0, len(day_cols))
+            idxs = [i for i in range(2, tds.count(), 2)][:day_count]
+
+            values = [_read_cell_number(tds.nth(i)) for i in idxs]
+            # still run through sanitizer to pad/clip if headers are <5 or >5
             values = _sanitize_values(values, proj)
             rows.append((proj, values))
+
         return rows
+
 
     # ───────── ARIA grid ─────────
     aria_rows = tbl.locator('[role="rowgroup"] [role="row"]')
@@ -720,12 +733,7 @@ class NaptaClient:
             if self._browser: self._browser.close()
         with suppress_exc():
             if self._p: self._p.stop()
-        # drop references so a fresh context is created next time
-        self._p = None
-        self._browser = None
-        self._ctx = None
-        self._page = None
-
+        self._p = self._browser = self._ctx = self._page = None
 
     def close(self):
         self._shutdown()
