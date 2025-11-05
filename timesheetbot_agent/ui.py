@@ -115,10 +115,8 @@ def input_prompt(prompt_text: str = "›", *, highlight_typed: bool = False) -> 
 
     - Uses prompt_toolkit (history, suggestions, keybindings) when available
       AND no event loop is already running.
-    - Only the label is cyan by default; typed text is not highlighted.
-      Pass highlight_typed=True if you ever want bold input.
-    - Falls back to Rich Prompt.ask otherwise; we re-apply the
-      readline/libedit fix so Backspace/Delete always work.
+    - Falls back to rich Console.input (no auto ':'), so the label stays exactly
+      as provided (e.g., "napta›") without an added colon.
     """
     try:
         if HAVE_PTK and not _event_loop_running():
@@ -127,7 +125,7 @@ def input_prompt(prompt_text: str = "›", *, highlight_typed: bool = False) -> 
                 "": "bold white" if highlight_typed else "",
             })
             return pt_prompt(
-                [("class:prompt", f"{prompt_text} ")],
+                [("class:prompt", f"{prompt_text} ")],  # note trailing space
                 style=style,
                 history=_TSBOT_HISTORY,
                 auto_suggest=AutoSuggestFromHistory(),
@@ -135,10 +133,13 @@ def input_prompt(prompt_text: str = "›", *, highlight_typed: bool = False) -> 
             )
         else:
             _fix_backspace_delete()
-            return Prompt.ask(f"[bold cyan]{prompt_text}[/]")
+            # Use Console.input so Rich does NOT append a ':' automatically.
+            # Keep a trailing space after the label for nicer typing feel.
+            return console.input(Text(f"{prompt_text} ", style="bold cyan"))
     except (KeyboardInterrupt, EOFError):
         # Map to semantic cancel per active policy
         raise UserCancelled()
+
 
 # ── Top banner ──────────────────────────────────────────────────────────────────
 def banner(profile_line: str) -> None:

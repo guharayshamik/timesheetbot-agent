@@ -380,16 +380,71 @@ class Engine:
                     ]
                 # Single-overlap path (keeps existing behavior)
                 else:
-                    sess["leave_details"][overlap["idx"]] = new_tuple
-                    _, new_month = _split(new_tuple[0])
-                    sess["recent_leave_month"] = new_month
-                    sess["month"] = new_month
-                    sess.pop("pending_overlap")
-                    save_session(sess)
-                    return [
-                        f"🔄 Replaced {overlap['old'][2]} {overlap['old'][0]}–{overlap['old'][1]} with {new_tuple[2]}.",
-                        "You can add more leaves or type `generate`.",
-                    ]
+                    new_s, new_e, new_t = overlap["new"]
+                    old_s, old_e, old_t = overlap["old"]
+                    idx = overlap["idx"]
+
+                    # Parse days/months
+                    ns_day, ns_mon = _split(new_s)
+                    ne_day, ne_mon = _split(new_e)
+                    os_day, os_mon = _split(old_s)
+                    oe_day, oe_mon = _split(old_e)
+
+                    # Same month guaranteed by overlap finder; ensure new is single-day and old spans multiple days
+                    if new_s == new_e and (old_s != old_e) and (ns_mon == os_mon == oe_mon):
+                        # Build: [old left], [new single], [old right] as needed
+                        updated = []
+
+                        # Left chunk: old_s .. (ns_day-1)
+                        if ns_day > os_day:
+                            left_start = old_s
+                            left_end = _fmt(ns_day - 1, os_mon)
+                            updated.append((left_start, left_end, old_t))
+
+                        # Middle: the new single day
+                        updated.append((new_s, new_e, new_t))
+
+                        # Right chunk: (ns_day+1) .. old_e
+                        if ns_day < oe_day:
+                            right_start = _fmt(ns_day + 1, os_mon)
+                            right_end = old_e
+                            updated.append((right_start, right_end, old_t))
+
+                        # Replace the old record at idx with the updated pieces
+                        sess["leave_details"].pop(idx)
+                        for rec in reversed(updated):
+                            sess["leave_details"].insert(idx, rec)
+
+                        # Track month
+                        sess["recent_leave_month"] = ns_mon
+                        sess["month"] = ns_mon
+                        sess.pop("pending_overlap")
+                        save_session(sess)
+
+                        # Compose a friendly summary
+                        parts = []
+                        if ns_day > os_day:
+                            parts.append(f"{old_t} {old_s}–{_fmt(ns_day - 1, os_mon)}")
+                        parts.append(f"{new_t} {new_s}")
+                        if ns_day < oe_day:
+                            parts.append(f"{old_t} {_fmt(ns_day + 1, os_mon)}–{old_e}")
+
+                        return [
+                            f"🔄 Split and replaced inside range: " + "; ".join(parts) + ".",
+                            "You can add more leaves or type `generate`.",
+                        ]
+                    else:
+                        # Fallback: original behavior (replace the single overlapped record)
+                        sess["leave_details"][idx] = (new_s, new_e, new_t)
+                        _, new_month = _split(new_s)
+                        sess["recent_leave_month"] = new_month
+                        sess["month"] = new_month
+                        sess.pop("pending_overlap")
+                        save_session(sess)
+                        return [
+                            f"🔄 Replaced {old_t} {old_s}–{old_e} with {new_t}.",
+                            "You can add more leaves or type `generate`.",
+                        ]
             elif ans in ("no", "n", "nope"):
                 sess.pop("pending_overlap"); save_session(sess)
                 return ["❌ Kept your original leave. Discarded the new one."]

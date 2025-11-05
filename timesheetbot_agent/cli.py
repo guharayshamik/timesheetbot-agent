@@ -32,7 +32,7 @@ from .storage import (
 from .napta import NaptaClient
 
 # Engine / storage / registration
-from .engine import Engine
+from .engine import Engine, _split
 from .storage import (
     load_profile,
     load_session,
@@ -87,12 +87,65 @@ def ensure_profile() -> dict:
 def show_help() -> None:
     show_govtech_help_detailed()
 
-def show_session_box() -> None:
-    sess = load_session()
-    month = sess.get("month", "—")
-    leaves = sess.get("leave_details", [])
-    lines = [f"Month: {month}", f"Leave details: {leaves}"]
-    panels(lines)
+# def show_session_box() -> None:
+#     sess = load_session()
+#     month = sess.get("month", "—")
+#     leaves = sess.get("leave_details", [])
+#     lines = [f"Month: {month}", f"Leave details: {leaves}"]
+#     panels(lines)
+def show_session_box():
+    from collections import defaultdict
+    sess = load_session() or {}
+    details = sess.get("leave_details", [])
+
+    # Group by month from the tuple's start date (format: "DD-MonthFullName")
+    grouped = defaultdict(list)
+    for tup in details:
+        if not isinstance(tup, (list, tuple)) or len(tup) < 3:
+            continue
+        start, end, ltype = tup[0], tup[1], tup[2]
+        try:
+            _d, mon = _split(start)  # returns (day_int, MonthFullName)
+        except Exception:
+            mon = "Unknown"
+        grouped[mon].append((start, end, ltype))
+
+    # Render helpers
+    def _short_mon(full: str) -> str:
+        return full[:3].title() if full else "—"
+
+    def _show_range(s: str, e: str) -> str:
+        ds, ms = _split(s)
+        de, me = _split(e)
+        if s == e:
+            return f"{ds} {_short_mon(ms)}"
+        return f"{ds}–{de} {_short_mon(ms)}"
+
+    # Preserve month order as first-seen in 'details'
+    seen_order = []
+    for item in details:
+        if not isinstance(item, (list, tuple)) or len(item) < 1:
+            continue
+        s = item[0]
+        try:
+            _, m = _split(s)
+        except Exception:
+            m = "Unknown"
+        if m not in seen_order:
+            seen_order.append(m)
+
+    lines = []
+    for mon in seen_order:
+        if mon not in grouped:
+            continue
+        lines.append(f"[bold]Month: {mon}[/bold]")
+        lines.append("")
+        for (s, e, t) in grouped[mon]:
+            lines.append(f"{t} — {_show_range(s, e)}")
+        lines.append("")
+
+    body = "\n".join(lines).rstrip() if lines else "No leaves recorded yet."
+    console.print(Panel(body, title="Leave details"))
 
 def _drain_stdin_nonblocking() -> None:
     """Swallow any pending newlines so we don't print a duplicate prompt."""
@@ -406,7 +459,7 @@ def _show_govtech_examples_compact() -> None:
     #ex_tbl.add_row(_bullet_line('"generate" — Create a new timesheet'))
     ex_tbl.add_row(_bullet_line('"email/eml" — Email generated timesheet to your registered manager'))
     ex_tbl.add_row(_bullet_line('"help/h/hlp" — Show available commands'))
-    ex_tbl.add_row(_bullet_line('"factory reset" — Wipe ALL data including generated files'))
+    ex_tbl.add_row(_bullet_line('"factory reset" — Wipe ALL data including old generated timesheets'))
 
     console.print(
         Panel(
@@ -467,7 +520,7 @@ def show_govtech_help_detailed() -> None:
     ex_tbl.add_row(_bullet_line('"reset profile" — Clear registration (re-register next time)'))
     ex_tbl.add_row(_bullet_line('"reset generated" — Delete generated timesheet files only'))
     ex_tbl.add_row(_bullet_line('"reset my data" — Clear GovTech profile/session/settings (keeps Napta & generated)'))
-    ex_tbl.add_row(_bullet_line('"factory reset" / "reset everything" — Wipe ALL data including generated files'))
+    ex_tbl.add_row(_bullet_line('"factory reset" / "reset everything" — Wipe ALL data including old generated timesheets'))
 
     console.print(
         Panel(
@@ -643,7 +696,7 @@ def main(argv: Optional[list] = None) -> int:
         while True:
             choice = menu("Choose an option:", [
             "GovTech Timesheet",
-            "Registration (GovTech entries)",
+            "Registration (GovTech Entries)",
             "Napta Timesheet",
             "Quit",
         ])

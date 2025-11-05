@@ -326,16 +326,32 @@ def _wait_for_save_submit_chip(page, timeout_ms: int) -> Optional[str]:
 # ────────────────────────── Table / grid view helpers ─────────────────────────
 
 def _pretty_labels(day_cols):
-        """Normalize labels like 'Monday03-11-2025' -> 'Monday 03-11-2025'."""
-        out = []
-        for _, lbl in day_cols:
-            s = " ".join((lbl or "").strip().split())
-            m = re.match(r'^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\s*(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})$',
-                        s, flags=re.I)
-            if m:
-                s = f"{m.group(1).title()} {m.group(2)}"
-            out.append(s)
-        return out
+    """Compact headers like 'Mon 10-11' (always with a space)."""
+    abbr = {
+        "monday":"Mon", "tuesday":"Tue", "wednesday":"Wed",
+        "thursday":"Thu", "friday":"Fri", "saturday":"Sat", "sunday":"Sun",
+    }
+    out = []
+    for _, lbl in day_cols:
+        s = " ".join((lbl or "").strip().split())
+        # Accept both 'Monday10-11-2025' and 'Monday 10-11-2025'
+        m = re.match(
+            r'^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\s*(\d{1,2})[-/](\d{1,2})[-/]\d{2,4}$',
+            s, flags=re.I
+        )
+        if m:
+            day = abbr[m.group(1).lower()]
+            dd  = f"{int(m.group(2)):02d}"
+            mm  = f"{int(m.group(3)):02d}"
+            out.append(f"{day} {dd}-{mm}")  # <-- enforced space
+        else:
+            # Fallback: if only day name, abbreviate it
+            parts = s.split()
+            if parts and parts[0].lower() in abbr:
+                parts[0] = abbr[parts[0].lower()]
+            out.append(" ".join(parts) or s)
+    return out
+
 
 def _find_timesheet_table(page):
     ci = "translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')"
@@ -514,20 +530,80 @@ def _verbatim_grid(tbl, day_cols):
             values = values + [""] * (day_count - len(values))
         return values
 
-    # ───────── Native <table> (alternate “control/value” cells) ─────────
+    # # ───────── Native <table> (alternate “control/value” cells) ─────────
+    # body_rows = tbl.locator("tbody tr")
+    # if body_rows.count():
+    #     import re
+
+    #     def _read_cell_number(cell):
+    #         # 1) prefer the hidden number input’s value
+    #         with suppress_exc():
+    #             inp = cell.locator("input[type='number']").first
+    #             if inp.count():
+    #                 v = (inp.get_attribute("value") or "").strip()
+    #                 if v:
+    #                     return f"{float(v):g}d"
+    #         # 2) fallback: visible text (ignore aria-hidden)
+    #         with suppress_exc():
+    #             el = cell.locator(
+    #                 "p:not([aria-hidden='true']),"
+    #                 "span:not([aria-hidden='true']),"
+    #                 "div:not([aria-hidden='true'])"
+    #             ).first
+    #             if el.count():
+    #                 t = (el.inner_text() or "").strip()
+    #                 m = re.search(r"\d+(?:\.\d+)?", t)
+    #                 if m:
+    #                     return f"{float(m.group(0)):g}d"
+    #         # 3) last resort: raw inner text
+    #         with suppress_exc():
+    #             raw = (cell.inner_text() or "").strip()
+    #             m = re.search(r"\d+(?:\.\d+)?", raw)
+    #             if m:
+    #                 return f"{float(m.group(0)):g}d"
+    #         return "0d"
+
+    #     for rix in range(body_rows.count()):
+    #         r = body_rows.nth(rix)
+    #         tds = r.locator("td")
+    #         if tds.count() < 3:
+    #             continue
+
+    #         # Project = first td
+    #         proj = _txt(tds.nth(0))
+    #         if not proj:
+    #             with suppress_exc():
+    #                 p0 = tds.nth(0).locator("p, div, span").first
+    #                 if p0.count():
+    #                     proj = _txt(p0)
+    #         if not proj:
+    #             continue
+
+    #         # Values = every 2nd td starting at index 2 (0-based):
+    #         # indices: 2,4,6,8,10 → Mon..Fri; ignore totals and anything after.
+    #         day_count = max(0, len(day_cols))
+    #         idxs = [i for i in range(2, tds.count(), 2)][:day_count]
+
+    #         values = [_read_cell_number(tds.nth(i)) for i in idxs]
+    #         # still run through sanitizer to pad/clip if headers are <5 or >5
+    #         values = _sanitize_values(values, proj)
+    #         rows.append((proj, values))
+
+    #     return rows
+    # ───────── Native <table> (alternate control/value cells) ─────────
     body_rows = tbl.locator("tbody tr")
     if body_rows.count():
         import re
 
         def _read_cell_number(cell):
-            # 1) prefer the hidden number input’s value
+            # Prefer the hidden <input type=number> value
             with suppress_exc():
                 inp = cell.locator("input[type='number']").first
                 if inp.count():
                     v = (inp.get_attribute("value") or "").strip()
                     if v:
                         return f"{float(v):g}d"
-            # 2) fallback: visible text (ignore aria-hidden)
+            # Fallback: visible text (ignore aria-hidden)
             with suppress_exc():
                 el = cell.locator(
                     "p:not([aria-hidden='true']),"
@@ -539,7 +615,7 @@ def _verbatim_grid(tbl, day_cols):
                     m = re.search(r"\d+(?:\.\d+)?", t)
                     if m:
                         return f"{float(m.group(0)):g}d"
-            # 3) last resort: raw inner text
+            # Last resort: raw text
             with suppress_exc():
                 raw = (cell.inner_text() or "").strip()
                 m = re.search(r"\d+(?:\.\d+)?", raw)
@@ -553,7 +629,7 @@ def _verbatim_grid(tbl, day_cols):
             if tds.count() < 3:
                 continue
 
-            # Project = first td
+            # Project = td #1
             proj = _txt(tds.nth(0))
             if not proj:
                 with suppress_exc():
@@ -563,17 +639,27 @@ def _verbatim_grid(tbl, day_cols):
             if not proj:
                 continue
 
-            # Values = every 2nd td starting at index 2 (0-based):
-            # indices: 2,4,6,8,10 → Mon..Fri; ignore totals and anything after.
-            day_count = max(0, len(day_cols))
-            idxs = [i for i in range(2, tds.count(), 2)][:day_count]
+            # Values: accept 3,5,7,9,11  (0-based: 2,4,6,8,10)
+            day_count = max(0, len(day_cols)) or 5
+            value_idxs = [i for i in range(2, tds.count(), 2)][:day_count]
+            values = [_read_cell_number(tds.nth(i)) for i in value_idxs]
 
-            values = [_read_cell_number(tds.nth(i)) for i in idxs]
-            # still run through sanitizer to pad/clip if headers are <5 or >5
+            # Total (if present): td #14  (0-based index 13)
+            total = ""
+            if tds.count() >= 14:
+                total = _read_cell_number(tds.nth(13))
+            else:
+                # compute a total if Napta didn't render one
+                s = 0.0
+                for v in values:
+                    m = re.search(r'\d+(?:\.\d+)?', v or '')
+                    if m: s += float(m.group(0))
+                total = f"{s:g}d"
+
             values = _sanitize_values(values, proj)
-            rows.append((proj, values))
-
+            rows.append((proj, values, total))
         return rows
+
 
 
     # ───────── ARIA grid ─────────
@@ -909,7 +995,6 @@ class NaptaClient:
         with suppress_exc():
             self._view_cache_path.write_text(json.dumps({"ts": time.time(), "which": which, "text": text}))
 
-
     def _view_week_fast(self, which: str = "current") -> Tuple[bool, str]:
         """Render the current or next week view in readable grid format."""
         cached = self._view_cache_get(which)
@@ -918,11 +1003,9 @@ class NaptaClient:
 
         # Headless browser session (uses saved state)
         self._ensure_session(headless=True)
-        #self._open_timesheet()
         _, err = _safe_run(lambda: self._open_timesheet(), "page load")
         if err:
             return False, err
-
 
         if self._on_login_page():
             name = f"napta_login_required_{ts()}.png"
@@ -940,7 +1023,6 @@ class NaptaClient:
         self._page.wait_for_load_state("domcontentloaded", timeout=5_000)
         time.sleep(1.5)
 
-
         # Wait for Save/Submit buttons or state chips
         _ = _wait_for_save_submit_chip(self._page, timeout_ms=DEFAULT_TIMEOUT_MS)
         chip = _get_status_chip_text(self._page) or "unknown"
@@ -949,7 +1031,6 @@ class NaptaClient:
         # Find the table/grid container
         tbl = _find_timesheet_table(self._page)
         if not tbl.count():
-            # Post-submit some tenants land elsewhere; reload once
             with suppress_exc():
                 self._page.goto(DEFAULT_APP_URL, timeout=45_000)
                 self._page.wait_for_load_state("domcontentloaded", timeout=3_000)
@@ -960,17 +1041,13 @@ class NaptaClient:
             return True, msg
 
         # Prefer robust headers (includes synthesized labels if DOM parsing fails)
-        day_cols = _get_weekday_headers(self._page)
+        day_cols = _get_weekday_headers(self._page) or _get_weekday_headers(tbl)
         if not day_cols:
-            day_cols = _get_weekday_headers(tbl)
-
-        if not day_cols:
-            # Last resort: show title & status only
             msg = f"🗓 {title}\nStatus: {chip}\n(Headers not found)"
             self._view_cache_put(which, msg)
             return True, msg
 
-        # Try reading grid rows (native, ARIA, or flex layouts)
+        # Read rows
         rows = _verbatim_grid(tbl, day_cols)
         if not rows:
             with suppress_exc():
@@ -980,23 +1057,59 @@ class NaptaClient:
         lines = [f"🗓 {title}"]
         if chip and chip.lower() != "unknown":
             lines.append(chip)
-        #lines.append(f"Status: {chip or 'unknown'}")
         lines.append("")
 
-        #labels = [label for _, label in day_cols]
-        labels = _pretty_labels(day_cols)
+        labels = _pretty_labels(day_cols)  # ["Mon 10-11", ...]
+        labels += ["Total"]
 
-        lines.append(" | ".join(["Project"] + labels))
-        lines.append("-" * max(40, len(lines[-1])))
+        # Fixed project width = exact length of Training row label
+        _TARGET = "PALO IT Singapore — SG - Training 2025"
+        proj_width = len(_TARGET)
 
+        # compute column widths so headers & values align
+        day_headers = labels[:-1]
+        total_header = labels[-1]
+
+        base_cell_width = 6  # fits "0.5d", "10d"
+        day_width = max(base_cell_width, max(len(h) for h in day_headers))   # align to header
+        total_width = max(base_cell_width, len(total_header))
+        gap_width = 3  # extra padding before Total on DATA ROWS only
+
+        def _fit_project(name: str) -> str:
+            if len(name) <= proj_width:
+                return name.ljust(proj_width)
+            return (name[:proj_width - 3] + " ..")
+
+        def fmt_row(project, cells, total):
+            wc = len(day_headers)
+            cells = (cells + [""] * (wc - len(cells)))[:wc]
+            pj = _fit_project(project)
+            cs = " | ".join(c.ljust(day_width) for c in cells)
+            tt = (total or "").ljust(total_width)
+            # add gap AFTER the bar before Total (rows only)
+            return f"{pj} | {cs} |{' ' * gap_width}{tt}"
+
+        # Header (NO extra gap here)
+        hdr_parts = [_fit_project("Project")] + [h.ljust(day_width) for h in day_headers] + [total_header.ljust(total_width)]
+        hdr = " | ".join(hdr_parts)
+        lines.append(hdr)
+        lines.append("-" * max(40, len(hdr)))
+
+        # Rows (auto-compute total when not provided)
+        import re
         if rows:
-            for proj, cells in rows:
-                # Pad/trim to match header count for clean columns
-                if len(cells) < len(labels):
-                    cells = cells + [""] * (len(labels) - len(cells))
-                elif len(cells) > len(labels):
-                    cells = cells[:len(labels)]
-                lines.append(" | ".join([proj] + cells))
+            for row in rows:
+                if len(row) == 3:
+                    proj, cells, total = row
+                else:
+                    proj, cells = row
+                    s = 0.0
+                    for v in cells:
+                        m = re.search(r'\d+(?:\.\d+)?', v or '')
+                        if m:
+                            s += float(m.group(0))
+                    total = f"{s:g}d"
+                lines.append(fmt_row(proj, cells, total))
         else:
             lines.append("(No rows)")
 
