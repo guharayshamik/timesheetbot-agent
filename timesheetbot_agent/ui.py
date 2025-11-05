@@ -14,6 +14,9 @@ from rich.box import ROUNDED
 from .config_loader import load_config
 from contextlib import contextmanager 
 
+import sys, termios
+
+
 console = Console()
 BORDER = "bright_blue"
 
@@ -35,6 +38,26 @@ def interrupt_policy(policy: str):
         yield
     finally:
         _POLICY_STACK.pop()
+
+@contextmanager
+def suppress_ctrlc_echo():
+    """
+    Temporarily disable ECHOCTL so Ctrl-C doesn't print '^C' on POSIX terminals.
+    No-op if termios/tty is unavailable.
+    """
+    try:
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        new = termios.tcgetattr(fd)
+        new[3] &= ~termios.ECHOCTL  # clear the ECHOCTL flag
+        termios.tcsetattr(fd, termios.TCSANOW, new)
+        try:
+            yield
+        finally:
+            termios.tcsetattr(fd, termios.TCSANOW, old)
+    except Exception:
+        # Non-POSIX or not a tty: just proceed without suppression.
+        yield
 
 def _current_policy() -> str:
     return _POLICY_STACK[-1] if _POLICY_STACK else "exit"

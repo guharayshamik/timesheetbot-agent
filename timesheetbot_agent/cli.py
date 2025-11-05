@@ -1,7 +1,13 @@
 # timesheetbot_agent/cli.py
 from __future__ import annotations
 from .config_loader import load_config
-
+from .errors import catch_all
+from .ui import banner, input_prompt, panel, suppress_ctrlc_echo, UserCancelled
+from .napta import NaptaClient
+from rich.table import Table
+from rich.text import Text
+from rich.panel import Panel
+from rich.box import ROUNDED
 
 import sys
 from typing import Optional
@@ -155,6 +161,85 @@ def _drain_stdin_nonblocking() -> None:
             sys.stdin.readline()
     except Exception:
         pass  # best effort
+
+def _run_napta_action(action: str):
+    with suppress_ctrlc_echo():
+        try:
+            ok, msg = _napta_run(action)
+        except (KeyboardInterrupt, EOFError):
+            return False, "↩️ Cancelled."
+    return ok, msg
+
+def _napta_run(action: str) -> tuple[bool, str]:
+    """
+    Run a Napta action in a clean subprocess (isolated from any running asyncio loop),
+    and return (ok, msg).
+
+    Supported actions:
+      - "login"
+      - "view_current", "view_next"
+      - "save_current", "save_next"
+      - "submit_current", "submit_next"
+      - "save_and_submit_current"
+    """
+    import sys, json, textwrap, subprocess
+
+    helper = textwrap.dedent("""
+        import json, sys, signal
+        from timesheetbot_agent.napta import NaptaClient
+
+        def main():
+            action = sys.argv[1] if len(sys.argv) > 1 else ""
+            c = NaptaClient()
+            try:
+                if action == "login":
+                    ok, msg = c.login()
+                elif action == "view_current":
+                    ok, msg = c.view_week("current")
+                elif action == "view_next":
+                    ok, msg = c.view_week("next")
+                elif action == "save_current":
+                    ok, msg = c.save_current_week()
+                elif action == "save_next":
+                    ok, msg = c.save_next_week()
+                elif action == "submit_current":
+                    ok, msg = c.submit_current_week()
+                elif action == "submit_next":
+                    ok, msg = c.submit_next_week()
+                elif action == "save_and_submit_current":
+                    ok, msg = c.save_and_submit_current_week()
+                else:
+                    ok, msg = False, f"Unknown napta action: {action}"
+            except KeyboardInterrupt:
+                ok, msg = False, "↩️ Cancelled."
+            except EOFError:
+                ok, msg = False, "↩️ Cancelled."
+            except Exception as e:
+                ok, msg = False, f"⚠️ Unexpected Napta error: {e}"
+            finally:
+                try:
+                    c.close()
+                except Exception:
+                    pass
+            print(json.dumps({"ok": ok, "msg": msg}))
+
+        if __name__ == "__main__":
+            main()
+    """).strip()
+
+    proc = subprocess.run(
+        [sys.executable, "-c", helper, action],
+        capture_output=True, text=True
+    )
+    if proc.returncode != 0:
+        return False, (proc.stdout.strip() or proc.stderr.strip() or "Napta helper failed")
+
+    try:
+        data = json.loads(proc.stdout.strip() or "{}")
+        return bool(data.get("ok")), str(data.get("msg", ""))
+    except Exception as e:
+        return False, f"Napta helper parse error: {e}\nSTDOUT: {proc.stdout}\nSTDERR: {proc.stderr}"
+
 
 def _normalize_engine_cmd(cmd: str) -> str:
     """
@@ -349,44 +434,34 @@ def handle_forget_command(text: str, *, flow: str | None = None, napta_client=No
 
 # ------------------------------ GovTech flow ---------------------------------
 
+@catch_all(flow="GovTech", on_cancel="exit")  # Ctrl-C at prompt exits tool
 def govtech_loop(profile: dict) -> None:
     eng = Engine(profile)
     eng.reset_session()  # start fresh so old leaves aren’t carried over
 
     banner(f"{profile.get('name')} <{profile.get('email')}>")
-    #show_vibrant_help()
     _show_govtech_examples_compact()
     print()  # one blank line before the prompt
 
     while True:
-        try:
-            s = input_prompt("govtech_timesheet›")
-        except (EOFError, KeyboardInterrupt):
-            panel("👋 Bye!")
-            return
-
+        # NOTE: Do NOT catch UserCancelled here; let the decorator handle it (exit)
+        s = input_prompt("govtech_timesheet›")
         if not s:
             continue
 
-       # cmd = s.strip()
         cmd = _normalize_command(s.strip())
 
-        # 🧹 Intercept forget commands (use RAW input so 'reset' isn't aliased to 'reset session')
+        # Intercept forget/reset (GovTech-scoped)
         reply = handle_forget_command(s.strip().lower(), flow="govtech")
         if reply is not None:
             for line in reply:
                 panel(line)
-            # live-refresh profile/engine so we don't use stale data after resets
+            # Live-refresh profile/engine after reset operations
             from .storage import load_profile as _lp
             new_prof = _lp() or {}
             if not new_prof:
                 panel("🧾 No registration found after reset.")
-                # Ask the user if they want to register now; otherwise return to main menu
-                try:
-                    yn = input_prompt("Register now? (yes/no)").strip().lower()
-                except UserCancelled:
-                    panel("↩️ Returning to main menu.")
-                    return
+                yn = input_prompt("Register now? (yes/no)").strip().lower()
                 if yn in ("y", "yes"):
                     new_prof = run_registration_interactive()
                     if not new_prof:
@@ -397,12 +472,8 @@ def govtech_loop(profile: dict) -> None:
                 else:
                     panel("↩️ Returning to main menu. ...")
                     return
-                # exit govtech_loop back to main menu
-            # If we have a profile, rebind the engine and continue
             eng = Engine(new_prof)
             continue
-
-
 
         # Core commands
         if cmd in ("/quit", "/q", "quit", "q", "/exit", "exit"):
@@ -422,23 +493,20 @@ def govtech_loop(profile: dict) -> None:
         if cmd in ("/clear", "clear", "cln", "clr"):
             clear_session(); panel("🧹 Session cleared."); continue
 
-
         if cmd in ("/deregister", "deregister"):
             clear_profile(); clear_session()
             panel("👋 Deregistered and session cleared. Returning to main menu.")
             return
-        
 
-        # Keep engine profile in sync with disk on every turn
+        # Keep engine profile in sync with disk each turn
         try:
             from .storage import load_profile as _lp
             eng.profile = _lp() or eng.profile
         except Exception:
             pass
-        # Hand over to engine
+
         out_lines = eng.handle_text(cmd)
         panels(out_lines)
-
 
 
 # ------------------------------ Napta (chat) ---------------------------------
@@ -533,7 +601,6 @@ def show_govtech_help_detailed() -> None:
         )
     )
 
-
 def _show_napta_simple_help_block() -> None:
     """Pretty 'NAPTA Chat mode ON + examples + commands' block (edit features removed)."""
     # Chip header
@@ -558,20 +625,6 @@ def _show_napta_simple_help_block() -> None:
         Panel(ex_tbl, title="Examples", title_align="left", border_style="cyan", box=box.ROUNDED, padding=(0, 1))
     )
 
-    maint = Text("\n".join([
-        "reset/forget napta   — Clear Napta session/cache (forces re-login)"
-    ]), style="bold yellow")
-    console.print(
-        Panel(
-            maint,
-            title="Maintenance (Napta)",
-            title_align="left",
-            border_style="yellow",
-            box=box.ROUNDED,
-            padding=(0, 1),
-        )
-    )
-
     # Commands — one per line
     cmds = Text(
         "\n".join([
@@ -592,104 +645,137 @@ def _show_napta_simple_help_block() -> None:
         Panel(cmds, title="Commands", title_align="left", border_style="magenta", box=box.ROUNDED, padding=(0, 1))
     )
 
+    # --- Napta Note (bulleted) ---
+    bullets = [
+        "1. Run 'login' once to open browser SSO and save your session.",
+        "2. `reset napta` or `forget napta` — clear Napta session/cache (forces re-login).",
+        "🚀 Performance Tip: Using a VPN can slow down Napta actions. For best speed, run the tool WITHOUT VPN, then reconnect when done.",
+    ]
 
+    bt = Table.grid(padding=(0, 1))
+    bt.add_column()
+
+    for line in bullets:
+        bt.add_row(Text("• ") + Text(line, style="bold yellow"))
+
+    console.print(
+        Panel(
+            bt,
+            title="Notes (Napta)",
+            title_align="left",
+            border_style="yellow",
+            box=ROUNDED,
+            padding=(0, 1),
+        )
+    )
+
+
+    
+
+@catch_all(flow="Napta", on_cancel="exit")  # Ctrl-C/Ctrl-D => show panel once, then exit tool
 def napta_loop(profile: dict) -> None:
     banner("Napta Timesheet")
 
+    # Lightweight status (actions go through subprocess helper)
     client = NaptaClient()
-    panel(f"Napta auth status: {client.status()}")
+    try:
+        panel(f"Napta auth status: {client.status()}")
+    except Exception:
+        pass  # status is best-effort; don't block the flow
 
-    # Napta chat mode UI (chip + examples + commands)
     _show_napta_simple_help_block()
 
-    # Notes
-    console.print(Panel(
-        "Tool uses your saved session or browser SSO cookies. ‘login’ will open a browser window to sign in once (SSO), to let the bot save your session.\n"
-        "Just ‘login’ once.",
-        border_style="white", box=box.ROUNDED,
-    ))
-
-    console.print(Panel(Text(
-    "🚀 Performance Tip: Using a VPN can slow down Napta actions (page loads, navigation, submit). "
-    "For best speed, run this tool WITHOUT VPN, then reconnect when done.",
-    style="bold bright_red",
-    )))
+    def _run_napta_action(action: str):
+        # Only hide the literal ^C; do NOT swallow interrupts.
+        with suppress_ctrlc_echo():
+            ok, msg = _napta_run(action)  # If Ctrl-C, this raises; decorator will exit.
+        return ok, msg
 
     while True:
-        try:
-            _drain_stdin_nonblocking()
-            raw = input_prompt("napta›")
-        except (EOFError, KeyboardInterrupt):
-            panel("👋 Bye!")
-            return
-
+        # NOTE: Do NOT catch UserCancelled here; decorator will handle and exit.
+        raw = input_prompt("napta›")
         if not raw:
             continue
 
         cmd = raw.strip().lower()
 
-        # 🧹 Intercept forget commands
+        # Forget/reset (Napta-scoped). This may call client.close() internally.
         reply = handle_forget_command(cmd, flow="napta", napta_client=client)
-
         if reply is not None:
             for line in reply:
                 panel(line)
             continue
 
-        # Generic exits
+        # --- Exit / Back ---
         if cmd in ("/quit", "/q", "quit", "q", "/exit", "exit"):
             panel("👋 Bye!")
-            sys.exit(0)
+            raise SystemExit(0)
 
         if cmd in ("back", "/back"):
-            panel("↩️  Back to main menu.")
+            panel("↩️ Back to main menu.")
+            try:
+                client.close()
+            except Exception:
+                pass
             return
 
-        # ---------- Allowed simple commands only ----------
+        # ---------- All Napta actions via isolated subprocess ----------
         if cmd in ("login", "/login"):
-            ok, msg = client.login()
+            ok, msg = _run_napta_action("login")
             panel(_maybe_add_shot_hint(msg))
-            if ok:
-                # force a fresh browser/context that reads the newly saved storage_state
-                try:
-                    client.close()
-                except Exception:
-                    pass
             continue
 
-
         if cmd in ("view", "/view", "show", "/show"):
-            ok, msg = client.view_week("current"); panel(_maybe_add_shot_hint(msg)); continue
+            ok, msg = _run_napta_action("view_current")
+            panel(_maybe_add_shot_hint(msg))
+            continue
 
-        if cmd in ("view next week", "/view next week", "view-next-week", "/view-next-week", "vnw", "/vnw"):
-            ok, msg = client.view_week("next"); panel(_maybe_add_shot_hint(msg)); continue
+        if cmd in ("view next week", "/view next week",
+                   "view-next-week", "/view-next-week", "vnw", "/vnw"):
+            ok, msg = _run_napta_action("view_next")
+            panel(_maybe_add_shot_hint(msg))
+            continue
 
         if cmd in ("save", "/save"):
-            ok, msg = client.save_current_week(); panel(_maybe_add_shot_hint(msg)); continue
+            ok, msg = _run_napta_action("save_current")
+            panel(_maybe_add_shot_hint(msg))
+            continue
 
-        if cmd in ("save next week", "/save next week", "save-next-week", "/save-next-week", "snw", "/snw"):
-            ok, msg = client.save_next_week(); panel(_maybe_add_shot_hint(msg)); continue
+        if cmd in ("save next week", "/save next week",
+                   "save-next-week", "/save-next-week", "snw", "/snw"):
+            ok, msg = _run_napta_action("save_next")
+            panel(_maybe_add_shot_hint(msg))
+            continue
 
         if cmd in ("submit", "/submit"):
-            ok, msg = client.submit_current_week(); panel(_maybe_add_shot_hint(msg)); continue
+            ok, msg = _run_napta_action("submit_current")
+            panel(_maybe_add_shot_hint(msg))
+            continue
 
-        if cmd in ("submit next week", "/submit next week", "submit-next-week", "/submit-next-week", "sbnw", "/sbnw"):
-            ok, msg = client.submit_next_week(); panel(_maybe_add_shot_hint(msg)); continue
+        if cmd in ("submit next week", "/submit next week",
+                   "submit-next-week", "/submit-next-week", "sbnw", "/sbnw"):
+            ok, msg = _run_napta_action("submit_next")
+            panel(_maybe_add_shot_hint(msg))
+            continue
 
         if cmd in ("ss", "/ss"):
-            ok, msg = client.save_and_submit_current_week(); panel(_maybe_add_shot_hint(msg)); continue
+            ok, msg = _run_napta_action("save_and_submit_current")
+            panel(_maybe_add_shot_hint(msg))
+            continue
 
-        # Fallback
+        # --- Unknown command ---
         panel(
             "⚠️ Unknown command. Use one of:\n"
-            "login\nview\nvnw (view next week)\nsave\nsnw (save next week)\n"
-            "submit\nsbnw (submit next week)\nss (save & submit this week)\nback\nquit"
+            "login\nview\nvnw (view next week)\n"
+            "save\nsnw (save next week)\n"
+            "submit\nsbnw (submit next week)\n"
+            "ss (save & submit this week)\n"
+            "back\nquit\nreset napta"
         )
-
-
 
 # ------------------------------ main menu ------------------------------------
 
+@catch_all(flow="CLI", on_cancel="exit")   # Ctrl-C at the main menu exits cleanly
 def main(argv: Optional[list] = None) -> int:
     banner("CLI Tool")
     try:
