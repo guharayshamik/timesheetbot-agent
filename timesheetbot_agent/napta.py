@@ -284,11 +284,19 @@ def _click_save(page) -> bool:
             return True
     return False
 
+# def _click_submit(page) -> bool:
+#     with suppress_exc():
+#         btn = page.get_by_role("button", name=re.compile(r"Submit for approval", re.I)).first
+#         if btn.count():
+#             btn.click(timeout=SHORT_TIMEOUT_MS)
+#             return True
+#     return False
 def _click_submit(page) -> bool:
     with suppress_exc():
         btn = page.get_by_role("button", name=re.compile(r"Submit for approval", re.I)).first
         if btn.count():
             btn.click(timeout=SHORT_TIMEOUT_MS)
+            _confirm_submit_modal(page)  # <-- new
             return True
     return False
 
@@ -322,6 +330,39 @@ def _wait_for_save_submit_chip(page, timeout_ms: int) -> Optional[str]:
             return None
         time.sleep(0.15)
     return None
+
+
+def _confirm_submit_modal(page) -> bool:
+    """
+    If a confirmation modal appears after clicking 'Submit for approval',
+    press the confirm/submit button. Returns True if nothing blocked us.
+    """
+    with suppress_exc():
+        # Common modal confirm buttons
+        btn = page.get_by_role("button", name=re.compile(r"^(Submit|Confirm|Yes|OK)$", re.I)).first
+        if btn.count():
+            btn.click(timeout=SHORT_TIMEOUT_MS)
+            return True
+    # No modal or couldn't find it is fine — continue
+    return True
+
+def _wait_until_submitted(page, timeout_ms: int) -> bool:
+    """
+    Wait until the status chip becomes 'Approval pending' or 'Submitted'
+    OR the 'Submit for approval' button disappears.
+    """
+    end = time.time() + (timeout_ms / 1000.0)
+    while time.time() < end:
+        with suppress_exc():
+            # button disappears?
+            if not page.get_by_role("button", name=re.compile(r"Submit for approval", re.I)).count():
+                return True
+        chip = (_get_status_chip_text(page) or "").strip().lower()
+        if chip.startswith(("approval pending", "submitted")):
+            return True
+        time.sleep(0.2)
+    return False
+
 
 # ────────────────────────── Table / grid view helpers ─────────────────────────
 
@@ -1256,6 +1297,10 @@ class NaptaClient:
         if state == "submit":
             if not _click_submit(self._page):
                 return False, "❌ Could not click 'Submit for approval'."
+            if not _wait_until_submitted(self._page, timeout_ms=DEFAULT_TIMEOUT_MS):
+                name = f"napta_submit_verify_{ts()}.png"
+                with suppress_exc(): self._page.screenshot(path=_shot(name), full_page=True)
+                return False, f"❌ Submit click didn't finalize. Screenshot -> {name}"
             with suppress_exc(): self._view_cache_path.unlink()
             return True, "✅ Submitted for approval."
 
@@ -1266,7 +1311,6 @@ class NaptaClient:
         _, err = _safe_run(lambda: self._open_timesheet(), "page load")
         if err:
             return False, err
-
 
         if self._on_login_page():
             name = f"napta_login_required_{ts()}.png"; self._page.screenshot(path=_shot(name), full_page=True)
@@ -1289,6 +1333,10 @@ class NaptaClient:
         if state == "submit":
             if not _click_submit(self._page):
                 return False, "❌ Could not click 'Submit for approval'."
+            if not _wait_until_submitted(self._page, timeout_ms=DEFAULT_TIMEOUT_MS):
+                name = f"napta_submit_verify_{ts()}.png"
+                with suppress_exc(): self._page.screenshot(path=_shot(name), full_page=True)
+                return False, f"❌ Submit click didn't finalize. Screenshot -> {name}"
             with suppress_exc(): self._view_cache_path.unlink()
             return True, "✅ Next week submitted for approval."
 
