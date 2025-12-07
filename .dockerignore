@@ -1,0 +1,12 @@
+# Don't send personal/generated data into build context
+generated_timesheets
+
+# Other stuff we don't need in the image
+build
+dist
+.venv
+__pycache__
+*.egg-info
+*.pyc
+.git
+

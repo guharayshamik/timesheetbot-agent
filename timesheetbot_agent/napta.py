@@ -1059,7 +1059,12 @@ class NaptaClient:
                 name = f"napta_nav_verify_{ts()}.png"
                 self._page.screenshot(path=_shot(name), full_page=True)
                 return False, f"❌ Navigation didn't land on next week. Screenshot -> {name}"
-
+        elif which == "previous":
+            if not self._go_to_previous_week():
+                name = f"napta_nav_verify_prev_{ts()}.png"
+                self._page.screenshot(path=_shot(name), full_page=True)
+                return False, f"❌ Navigation didn't land on previous week. Screenshot -> {name}"
+            
         # Allow DOM to fully update after week switch
         self._page.wait_for_load_state("domcontentloaded", timeout=5_000)
         time.sleep(1.5)
@@ -1095,7 +1100,7 @@ class NaptaClient:
                 rows = _read_flex_grid(tbl, day_cols)
 
         # ─────────── Build formatted output ───────────
-        lines = [f"🗓 {title}"]
+        lines = [f"🗓  week -  {title}"]
         if chip and chip.lower() != "unknown":
             lines.append(chip)
         lines.append("")
@@ -1186,6 +1191,52 @@ class NaptaClient:
                 if after and after != before:
                     return True
                 time.sleep(0.3)
+        return False
+
+    def _go_to_previous_week(self) -> bool:
+        """
+        Navigate to the previous period/week.
+
+        Uses the same strategy as _go_to_next_week:
+        - data-cy based navLeft / PeriodNavigation_navLeft
+        - generic 'Previous' / '<' button
+        - ArrowLeft as keyboard fallback
+        - verifies change via title or weekday-header fingerprint
+        """
+        before_title = (_get_week_title(self._page) or "").strip()
+        before_fp = _period_fingerprint(self._page)
+        before = before_title or before_fp
+
+        attempts = 0
+        while attempts < 3:
+            attempts += 1
+
+            # data-cy: navLeft / PeriodNavigation_navLeft
+            with suppress_exc():
+                self._page.locator(
+                    '[data-cy*="navLeft"], [data-cy*="PeriodNavigation_navLeft"]'
+                ).first.click(timeout=SHORT_TIMEOUT_MS)
+
+            # generic "Previous" / "<"
+            with suppress_exc():
+                self._page.get_by_role(
+                    "button",
+                    name=re.compile(r"Previous|<", re.I)
+                ).first.click(timeout=SHORT_TIMEOUT_MS)
+
+            # keyboard fallback
+            with suppress_exc():
+                self._page.keyboard.press("ArrowLeft")
+
+            # Wait for label/fingerprint to change
+            for _ in range(30):
+                time.sleep(0.3)
+                after_title = (_get_week_title(self._page) or "").strip()
+                after_fp = _period_fingerprint(self._page)
+                after = after_title or after_fp
+                if after and after != before:
+                    return True
+
         return False
 
     # ─────────────────────────── Save / Submit (fast) ───────────────────────────

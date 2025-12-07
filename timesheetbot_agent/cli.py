@@ -8,6 +8,9 @@ from rich.table import Table
 from rich.text import Text
 from rich.panel import Panel
 from rich.box import ROUNDED
+import json
+import subprocess
+import textwrap
 
 import sys
 from typing import Optional
@@ -162,30 +165,134 @@ def _drain_stdin_nonblocking() -> None:
     except Exception:
         pass  # best effort
 
-def _run_napta_action(action: str):
-    with suppress_ctrlc_echo():
-        try:
-            ok, msg = _napta_run(action)
-        except (KeyboardInterrupt, EOFError):
-            return False, "↩️ Cancelled."
-    return ok, msg
 
-def _napta_run(action: str) -> tuple[bool, str]:
+
+# def _run_napta_action(action: str):
+#     with suppress_ctrlc_echo():
+#         try:
+#             ok, msg = _napta_run(action)
+#         except (KeyboardInterrupt, EOFError):
+#             return False, "↩️ Cancelled."
+#     return ok, msg
+
+# def _napta_run(action: str) -> tuple[bool, str]:
+#     """
+#     Run a Napta action in a clean subprocess (isolated from any running asyncio loop),
+#     and return (ok, msg).
+
+#     Supported actions:
+#       - "login"
+#       - "view_current", "view_next"
+#       - "save_current", "save_next"
+#       - "submit_current", "submit_next"
+#       - "save_and_submit_current"
+#     """
+#     import sys, json, textwrap, subprocess
+
+#     helper = textwrap.dedent("""
+#         import json, sys, signal
+#         from timesheetbot_agent.napta import NaptaClient
+
+#         def main():
+#             action = sys.argv[1] if len(sys.argv) > 1 else ""
+#             c = NaptaClient()
+#             try:
+#                 if action == "login":
+#                     ok, msg = c.login()
+#                 elif action == "view_current":
+#                     ok, msg = c.view_week("current")
+#                 elif action == "view_next":
+#                     ok, msg = c.view_week("next")
+#                 elif action == "save_current":
+#                     ok, msg = c.save_current_week()
+#                 elif action == "save_next":
+#                     ok, msg = c.save_next_week()
+#                 elif action == "submit_current":
+#                     ok, msg = c.submit_current_week()
+#                 elif action == "submit_next":
+#                     ok, msg = c.submit_next_week()
+#                 elif action == "save_and_submit_current":
+#                     ok, msg = c.save_and_submit_current_week()
+#                 else:
+#                     ok, msg = False, f"Unknown napta action: {action}"
+#             except KeyboardInterrupt:
+#                 ok, msg = False, "↩️ Cancelled."
+#             except EOFError:
+#                 ok, msg = False, "↩️ Cancelled."
+#             except Exception as e:
+#                 ok, msg = False, f"⚠️ Unexpected Napta error: {e}"
+#             finally:
+#                 try:
+#                     c.close()
+#                 except Exception:
+#                     pass
+#             print(json.dumps({"ok": ok, "msg": msg}))
+
+#         if __name__ == "__main__":
+#             main()
+#     """).strip()
+
+#     proc = subprocess.run(
+#         [sys.executable, "-c", helper, action],
+#         capture_output=True, text=True
+#     )
+#     if proc.returncode != 0:
+#         return False, (proc.stdout.strip() or proc.stderr.strip() or "Napta helper failed")
+
+#     try:
+#         data = json.loads(proc.stdout.strip() or "{}")
+#         return bool(data.get("ok")), str(data.get("msg", ""))
+#     except Exception as e:
+#         return False, f"Napta helper parse error: {e}\nSTDOUT: {proc.stdout}\nSTDERR: {proc.stderr}"
+
+def _run_napta_action(action: str, *, timeout_sec: int = 180) -> tuple[bool, str]:
     """
-    Run a Napta action in a clean subprocess (isolated from any running asyncio loop),
-    and return (ok, msg).
+    Run a Napta action.
 
-    Supported actions:
-      - "login"
-      - "view_current", "view_next"
-      - "save_current", "save_next"
-      - "submit_current", "submit_next"
-      - "save_and_submit_current"
+    - In frozen (PyInstaller) mode: run inline (no subprocess) to avoid recursion
+      where sys.executable == the tsbot binary.
+    - In dev/venv mode: use a subprocess helper to keep things isolated.
     """
-    import sys, json, textwrap, subprocess
+    # 1) FROZEN: run inline (no subprocess)
+    if getattr(sys, "frozen", False):
+        with suppress_ctrlc_echo():
+            try:
+                c = NaptaClient()
+                try:
+                    if action == "login":
+                        ok, msg = c.login()
+                    elif action == "view_current":
+                        ok, msg = c.view_week("current")
+                    elif action == "view_next":
+                        ok, msg = c.view_week("next")
+                    elif action == "view_previous":              
+                        ok, msg = c.view_week("previous")
+                    elif action == "save_current":
+                        ok, msg = c.save_current_week()
+                    elif action == "save_next":
+                        ok, msg = c.save_next_week()
+                    elif action == "submit_current":
+                        ok, msg = c.submit_current_week()
+                    elif action == "submit_next":
+                        ok, msg = c.submit_next_week()
+                    elif action == "save_and_submit_current":
+                        ok, msg = c.save_and_submit_current_week()
+                    else:
+                        ok, msg = False, f"Unknown napta action: {action}"
+                finally:
+                    try:
+                        c.close()
+                    except Exception:
+                        pass
+            except (KeyboardInterrupt, EOFError):
+                ok, msg = False, "↩️ Cancelled."
+            except Exception as e:
+                ok, msg = False, f"⚠️ Unexpected Napta error: {e}"
+        return ok, msg
 
+    # 2) DEV / VENV: keep the subprocess isolation
     helper = textwrap.dedent("""
-        import json, sys, signal
+        import json, sys
         from timesheetbot_agent.napta import NaptaClient
 
         def main():
@@ -198,6 +305,8 @@ def _napta_run(action: str) -> tuple[bool, str]:
                     ok, msg = c.view_week("current")
                 elif action == "view_next":
                     ok, msg = c.view_week("next")
+                elif action == "view_previous":
+                    ok, msg = c.view_week("previous")
                 elif action == "save_current":
                     ok, msg = c.save_current_week()
                 elif action == "save_next":
@@ -227,19 +336,32 @@ def _napta_run(action: str) -> tuple[bool, str]:
             main()
     """).strip()
 
-    proc = subprocess.run(
-        [sys.executable, "-c", helper, action],
-        capture_output=True, text=True
-    )
+    with suppress_ctrlc_echo():
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-c", helper, action],
+                capture_output=True,
+                text=True,
+                timeout=timeout_sec,
+            )
+        except subprocess.TimeoutExpired:
+            return False, (
+                "⚠️ Napta action took too long and was aborted.\n"
+                "• Check VPN/network speed.\n"
+                "• If this keeps happening, run `tsbot start` (venv version) to see detailed errors."
+            )
+
     if proc.returncode != 0:
-        return False, (proc.stdout.strip() or proc.stderr.strip() or "Napta helper failed")
+        stdout = (proc.stdout or "").strip()
+        stderr = (proc.stderr or "").strip()
+        msg = stdout or stderr or "Napta helper failed"
+        return False, msg
 
     try:
         data = json.loads(proc.stdout.strip() or "{}")
         return bool(data.get("ok")), str(data.get("msg", ""))
     except Exception as e:
         return False, f"Napta helper parse error: {e}\nSTDOUT: {proc.stdout}\nSTDERR: {proc.stderr}"
-
 
 def _normalize_engine_cmd(cmd: str) -> str:
     """
@@ -610,27 +732,13 @@ def _show_napta_simple_help_block() -> None:
     # Subtitle
     console.print(Text("Describe your Napta action in plain English, e.g.:", style="bold cyan"))
 
-    # Examples (only view/save/submit flows)
-    ex_tbl = Table.grid(padding=(0, 1))
-    ex_tbl.add_column()
-    ex_tbl.add_row(_bullet_line("'login' — Sign in once (SSO) using cli and save the session"))
-    ex_tbl.add_row(_bullet_line("'view' — Show CURRENT week entries"))
-    ex_tbl.add_row(_bullet_line("'view next week' (or 'vnw') — Show NEXT week entries"))
-    ex_tbl.add_row(_bullet_line("'save' — Save CURRENT week (draft)"))
-    ex_tbl.add_row(_bullet_line("'submit' — Submit CURRENT week for approval"))
-    ex_tbl.add_row(_bullet_line("'save next week' (or 'snw') — Save NEXT week (draft)"))
-    ex_tbl.add_row(_bullet_line("'submit next week' (or 'sbnw') — Submit NEXT week for approval"))
-    ex_tbl.add_row(_bullet_line("'ss' — Save then Submit (CURRENT week)"))
-    console.print(
-        Panel(ex_tbl, title="Examples", title_align="left", border_style="cyan", box=box.ROUNDED, padding=(0, 1))
-    )
-
     # Commands — one per line
     cmds = Text(
         "\n".join([
             "login",
             "view",
             "vnw (view next week)",
+            "vpw (view previous week)",
             "save",
             "snw (save next week)",
             "submit",
@@ -643,6 +751,22 @@ def _show_napta_simple_help_block() -> None:
     )
     console.print(
         Panel(cmds, title="Commands", title_align="left", border_style="magenta", box=box.ROUNDED, padding=(0, 1))
+    )
+
+    # Examples (only view/save/submit flows)
+    ex_tbl = Table.grid(padding=(0, 1))
+    ex_tbl.add_column()
+    ex_tbl.add_row(_bullet_line("'login' — Sign in once (SSO) using cli and save the session"))
+    ex_tbl.add_row(_bullet_line("'view' — Show CURRENT week entries"))
+    ex_tbl.add_row(_bullet_line("'view next week' (or 'vnw') — Show NEXT week entries"))
+    ex_tbl.add_row(_bullet_line("'view previous week' (or 'vpw') — Show PREVIOUS week entries"))
+    ex_tbl.add_row(_bullet_line("'save' — Save CURRENT week (draft)"))
+    ex_tbl.add_row(_bullet_line("'submit' — Submit CURRENT week for approval"))
+    ex_tbl.add_row(_bullet_line("'save next week' (or 'snw') — Save NEXT week (draft)"))
+    ex_tbl.add_row(_bullet_line("'submit next week' (or 'sbnw') — Submit NEXT week for approval"))
+    ex_tbl.add_row(_bullet_line("'ss' — Save then Submit (CURRENT week)"))
+    console.print(
+        Panel(ex_tbl, title="Examples", title_align="left", border_style="cyan", box=box.ROUNDED, padding=(0, 1))
     )
 
     # --- Napta Note (bulleted) ---
@@ -661,15 +785,13 @@ def _show_napta_simple_help_block() -> None:
     console.print(
         Panel(
             bt,
-            title="Notes (Napta)",
+            title="Notes",
             title_align="left",
             border_style="yellow",
             box=ROUNDED,
             padding=(0, 1),
         )
     )
-
-
     
 
 @catch_all(flow="Napta", on_cancel="exit")  # Ctrl-C/Ctrl-D => show panel once, then exit tool
@@ -685,11 +807,11 @@ def napta_loop(profile: dict) -> None:
 
     _show_napta_simple_help_block()
 
-    def _run_napta_action(action: str):
-        # Only hide the literal ^C; do NOT swallow interrupts.
-        with suppress_ctrlc_echo():
-            ok, msg = _napta_run(action)  # If Ctrl-C, this raises; decorator will exit.
-        return ok, msg
+    # def _run_napta_action(action: str):
+    #     # Only hide the literal ^C; do NOT swallow interrupts.
+    #     with suppress_ctrlc_echo():
+    #         ok, msg = _napta_run(action)  # If Ctrl-C, this raises; decorator will exit.
+    #     return ok, msg
 
     while True:
         # NOTE: Do NOT catch UserCancelled here; decorator will handle and exit.
@@ -735,6 +857,14 @@ def napta_loop(profile: dict) -> None:
             ok, msg = _run_napta_action("view_next")
             panel(_maybe_add_shot_hint(msg))
             continue
+
+        if cmd in ("view previous week", "/view previous week",
+                    "view-prev-week", "/view-prev-week",
+                    "vpw", "/vpw", "vp", "/vp"):
+            ok, msg = _run_napta_action("view_previous")
+            panel(_maybe_add_shot_hint(msg))
+            continue
+
 
         if cmd in ("save", "/save"):
             ok, msg = _run_napta_action("save_current")
