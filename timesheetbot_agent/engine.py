@@ -9,6 +9,7 @@ from typing import List, Tuple, Optional, Dict, Any, Sequence
 from .storage import load_session, save_session, clear_session
 #from .ph_sg import PUBLIC_HOLIDAYS  # pass PHs to the generator
 from .config_loader import load_config, load_sg_holidays
+from .storage import get_generated_dir
 
 
 
@@ -780,7 +781,8 @@ class Engine:
         remarks: Dict[str, str],
     ) -> List[str]:
         out: List[str] = []
-        out_dir = Path.cwd() / "generated_timesheets"
+        # out_dir = Path.cwd() / "generated_timesheets"
+        out_dir = get_generated_dir()
         out_dir.mkdir(exist_ok=True)
 
         try:

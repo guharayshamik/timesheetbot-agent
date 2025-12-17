@@ -79,7 +79,8 @@ def generate_govtech_timesheet(
     month: int,                      # 1..12
     year: int,                       # e.g., 2025
     leave_details: List[Sequence],   # [(start,end,type)] or [(date,type)] — list or tuple
-    out_dir: str | Path = "generated_timesheets",
+    # out_dir: str | Path = "generated_timesheets",
+    out_dir: str | Path | None = None,
     public_holidays: Optional[Dict[str, str]] = None,  # {"YYYY-MM-DD": "Holiday Name"}
     remarks: Optional[Dict[str, str]] = None,          # {"DD-Month": "text"} or {"YYYY-MM-DD": "text"}
 ) -> str:
@@ -114,7 +115,18 @@ def generate_govtech_timesheet(
 
     # File setup
     month_name = datetime(year, month, 1).strftime("%B")
-    out_dir = Path(out_dir)
+    if out_dir is None:
+        try:
+            from ..storage import get_generated_dir
+            out_dir = get_generated_dir()
+        except Exception:
+            out_dir = "generated_timesheets"  # fallback
+
+    # out_dir = Path(out_dir).expanduser()
+    # out_dir.mkdir(parents=True, exist_ok=True)
+    # out_dir = Path(out_dir)
+    # out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = Path(out_dir).expanduser()
     out_dir.mkdir(parents=True, exist_ok=True)
     filename = f"{month_name}_{year}_Timesheet_{name.replace(' ', '_')}.xlsx"
     out_path = out_dir / filename
@@ -503,14 +515,14 @@ def generate_govtech_timesheet(
     wb.save(str(out_path))
     return str(out_path)
 
-
 # Convenience wrapper used by the CLI engine
 def generate_cli(
     profile: Dict,
     month_int: int,
     year: int,
     leave_details: List[Sequence],
-    out_dir: str | Path = "generated_timesheets",
+    # out_dir: str | Path = "generated_timesheets",
+    out_dir: str | Path | None = None,
     public_holidays: Optional[Dict[str, str]] = None,
     remarks: Optional[Dict[str, str]] = None,
 ) -> str:
