@@ -58,6 +58,25 @@ from rich.table import Table  # used in Napta help block
 
 from pathlib import Path
 
+import os
+
+def _configure_playwright_for_frozen_app() -> None:
+    # Only apply for PyInstaller/frozen builds
+    if not getattr(sys, "frozen", False):
+        return
+
+    base_dir = Path(sys.executable).resolve().parent
+    browsers_dir = base_dir / "_internal" / "ms-playwright"
+
+    # Tell Playwright where the bundled browsers are
+    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(browsers_dir)
+
+    # Avoid Playwright trying to download browsers on user machines
+    os.environ.setdefault("PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD", "1")
+
+_configure_playwright_for_frozen_app()
+
+
 # Matches napta.py’s screenshot directory:
 _SHOT_DIR = (Path.home() / ".tsbot" / "napta" / "shots").resolve()
 
