@@ -35,10 +35,13 @@ pyinstaller \
 mkdir -p dist/tsbot/ms-playwright
 cp -R "$HOME/Library/Caches/ms-playwright/"* dist/tsbot/ms-playwright/
 
-# 7. Add user installer
+# 7. Add user installer + uninstaller
 cp user-install.sh dist/tsbot/install.sh
+cp user-uninstall.sh dist/tsbot/uninstall.sh
 chmod +x dist/tsbot/install.sh
+chmod +x dist/tsbot/uninstall.sh
 chmod +x dist/tsbot/tsbot
+
 
 echo ""
 echo "✅ Build complete!"
