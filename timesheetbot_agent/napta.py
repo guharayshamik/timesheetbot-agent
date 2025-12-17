@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-import os
+import os, sys
 import re
 import time
 from datetime import datetime
@@ -17,6 +17,12 @@ except Exception:  # pragma: no cover
 
 from playwright.sync_api import sync_playwright
 from playwright._impl._errors import TimeoutError as PlaywrightTimeoutError
+
+# If running as a PyInstaller bundle, point Playwright to the bundled browsers
+if getattr(sys, "frozen", False):
+    base = Path(getattr(sys, "_MEIPASS", Path.cwd()))
+    os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(base / "ms-playwright"))
+    os.environ.setdefault("PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD", "1")
 
 
 # ──────────────────────────────── Config / Paths ───────────────────────────────

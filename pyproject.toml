@@ -8,12 +8,20 @@ version = "0.1.0"
 description = "Local CLI timesheet bot"
 readme = "README.md"
 requires-python = ">=3.9"
+
 dependencies = [
   "openpyxl>=3.1.2",
-  "prompt_toolkit>=3.0.43",
+  "prompt-toolkit>=3.0.43",
   "pyyaml>=6.0.1",
-  "rich>=13.7"
+  "rich>=13.7",
+
+  # Napta automation
+  "playwright>=1.40.0",
 ]
+
+[project.optional-dependencies]
+# Optional fallback for Napta SSO via browser cookies
+napta-cookies = ["browser-cookie3>=0.19.1"]
 
 [project.scripts]
 tsbot = "timesheetbot_agent.cli:main"
@@ -21,3 +29,11 @@ tsbot = "timesheetbot_agent.cli:main"
 [tool.setuptools.packages.find]
 include = ["timesheetbot_agent*"]
 exclude = ["tests*", "examples*"]
+
+# Include YAML / JSON config files inside the package
+[tool.setuptools.package-data]
+timesheetbot_agent = [
+  "config/*.yaml",
+  "config/*.yml",
+  "config/*.json",
+]
