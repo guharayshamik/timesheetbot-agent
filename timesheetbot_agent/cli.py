@@ -8,6 +8,7 @@ from rich.table import Table
 from rich.text import Text
 from rich.panel import Panel
 from rich.box import ROUNDED
+import contextlib
 import json
 import subprocess
 import textwrap
@@ -59,6 +60,17 @@ from rich.table import Table  # used in Napta help block
 from pathlib import Path
 
 import os
+
+@contextlib.contextmanager
+def silence_stderr():
+    """Temporarily redirect stderr to /dev/null (production UX for frozen builds)."""
+    try:
+        with open(os.devnull, "w") as dn, contextlib.redirect_stderr(dn):
+            yield
+    except Exception:
+        # Never let this block execution/cleanup
+        yield
+
 
 def _configure_playwright_for_frozen_app() -> None:
     # Only apply for PyInstaller/frozen builds
@@ -275,38 +287,39 @@ def _run_napta_action(action: str, *, timeout_sec: int = 180) -> tuple[bool, str
     # 1) FROZEN: run inline (no subprocess)
     if getattr(sys, "frozen", False):
         with suppress_ctrlc_echo():
-            try:
-                c = NaptaClient()
+            with silence_stderr():
                 try:
-                    if action == "login":
-                        ok, msg = c.login()
-                    elif action == "view_current":
-                        ok, msg = c.view_week("current")
-                    elif action == "view_next":
-                        ok, msg = c.view_week("next")
-                    elif action == "view_previous":              
-                        ok, msg = c.view_week("previous")
-                    elif action == "save_current":
-                        ok, msg = c.save_current_week()
-                    elif action == "save_next":
-                        ok, msg = c.save_next_week()
-                    elif action == "submit_current":
-                        ok, msg = c.submit_current_week()
-                    elif action == "submit_next":
-                        ok, msg = c.submit_next_week()
-                    elif action == "save_and_submit_current":
-                        ok, msg = c.save_and_submit_current_week()
-                    else:
-                        ok, msg = False, f"Unknown napta action: {action}"
-                finally:
+                    c = NaptaClient()
                     try:
-                        c.close()
-                    except Exception:
-                        pass
-            except (KeyboardInterrupt, EOFError):
-                ok, msg = False, "↩️ Cancelled."
-            except Exception as e:
-                ok, msg = False, f"⚠️ Unexpected Napta error: {e}"
+                        if action == "login":
+                            ok, msg = c.login()
+                        elif action == "view_current":
+                            ok, msg = c.view_week("current")
+                        elif action == "view_next":
+                            ok, msg = c.view_week("next")
+                        elif action == "view_previous":              
+                            ok, msg = c.view_week("previous")
+                        elif action == "save_current":
+                            ok, msg = c.save_current_week()
+                        elif action == "save_next":
+                            ok, msg = c.save_next_week()
+                        elif action == "submit_current":
+                            ok, msg = c.submit_current_week()
+                        elif action == "submit_next":
+                            ok, msg = c.submit_next_week()
+                        elif action == "save_and_submit_current":
+                            ok, msg = c.save_and_submit_current_week()
+                        else:
+                            ok, msg = False, f"Unknown napta action: {action}"
+                    finally:
+                        try:
+                            c.close()
+                        except Exception:
+                            pass
+                except (KeyboardInterrupt, EOFError):
+                    ok, msg = False, "↩️ Cancelled."
+                except Exception as e:
+                    ok, msg = False, f"⚠️ Unexpected Napta error: {e}"
         return ok, msg
 
     # 2) DEV / VENV: keep the subprocess isolation

@@ -8,6 +8,10 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple
+import contextlib
+import atexit
+import gc
+from weakref import WeakSet
 
 # Optional dependency; used only as a fallback
 try:
@@ -17,6 +21,19 @@ except Exception:  # pragma: no cover
 
 from playwright.sync_api import sync_playwright
 from playwright._impl._errors import TimeoutError as PlaywrightTimeoutError
+
+# Track live Playwright clients so we can shut them down before interpreter teardown.
+# This avoids noisy 'event loop is closed' / 'Task was destroyed' messages in PyInstaller builds.
+_LIVE_CLIENTS: WeakSet = WeakSet()
+
+def _shutdown_all_live_clients() -> None:
+    for c in list(_LIVE_CLIENTS):
+        try:
+            c.close()
+        except Exception:
+            pass
+
+atexit.register(_shutdown_all_live_clients)
 
 # If running as a PyInstaller bundle, point Playwright to the bundled browsers
 if getattr(sys, "frozen", False):
@@ -84,6 +101,18 @@ class suppress_exc:
         self._exc = exc
         return not self.raise_on_fail
 
+@contextlib.contextmanager
+def _silence_stderr():
+    """Silence stderr during Playwright teardown to avoid noisy asyncio warnings in frozen builds."""
+    try:
+        with open(os.devnull, "w") as dn:
+            with contextlib.redirect_stderr(dn):
+                yield
+    except Exception:
+        yield
+
+
+
 def _route_slim(route):
     req = route.request
     if req.resource_type in ("image", "media", "font"):
@@ -102,14 +131,40 @@ def _proxy_conf():
     url = os.getenv("PLAYWRIGHT_PROXY") or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
     return {"server": url} if url else None
 
+# def _safe_run(fn, label: str = "operation"):
+#     """Run a Playwright action with graceful timeout recovery."""
+#     try:
+#         return fn(), None
+#     except PlaywrightTimeoutError:
+#         return None, f"⏰ The {label} took too long (timed out). Please retry in a few seconds."
+#     except Exception as e:
+#         return None, f"⚠️ Unexpected error during {label}: {e}"
+
 def _safe_run(fn, label: str = "operation"):
-    """Run a Playwright action with graceful timeout recovery."""
     try:
         return fn(), None
-    except PlaywrightTimeoutError:
-        return None, f"⏰ The {label} took too long (timed out). Please retry in a few seconds."
+    except KeyboardInterrupt:
+        return None, "↩️ Cancelled."
     except Exception as e:
-        return None, f"⚠️ Unexpected error during {label}: {e}"
+        # Treat Playwright “closed by user” as a normal cancel
+        if _is_cancelled_exc(e):
+            return None, "↩️ Cancelled."
+        return None, f"⚠️ Unexpected Napta error: {e}"
+
+def _is_cancelled_exc(e: Exception) -> bool:
+    """
+    Best-effort detection of user-cancelled/closed Playwright flows.
+    We intentionally match by message to avoid depending on private Playwright classes.
+    """
+    msg = str(e).lower()
+    return (
+        "targetclosederror" in msg
+        or ("target page" in msg and "closed" in msg)
+        or "context or browser has been closed" in msg
+        or "browser has been closed" in msg
+        or "event loop is closed" in msg
+    )
+
 
 
 # ────────────────────────────── Page read helpers ─────────────────────────────
@@ -797,6 +852,8 @@ class NaptaClient:
         self._ctx = None
         self._page = None
         self._view_cache_path = _APP_DIR / "view_cache.json"
+        self._closed = False
+        _LIVE_CLIENTS.add(self)
 
     # ───── Public API (synchronous) ─────
 
@@ -831,6 +888,12 @@ class NaptaClient:
             return ok, msg
         return self._submit_current_week_fast()
 
+    def __del__(self) -> None:
+        # Avoid doing real Playwright shutdown work here.
+        # __del__ can run very late during interpreter teardown in frozen builds.
+        # We rely on explicit close() and the atexit handler above.
+        return
+
     # ────────────────── Playwright lifecycle ──────────────────
 
     def _ensure_session(self, *, headless: bool = True):
@@ -838,37 +901,87 @@ class NaptaClient:
         if headless and self._p and self._browser and self._ctx and self._page:
             return
 
-        self._p = sync_playwright().start()
-        self._browser = self._p.chromium.launch(
-            headless=headless,
-            proxy=_proxy_conf(),
-            args=["--disable-dev-shm-usage"],
-        )
-        # Use storage_state when available (avoid re-login)
-        if STATE_PATH.exists():
-            self._ctx = self._browser.new_context(storage_state=str(STATE_PATH))
-        else:
-            self._ctx = self._browser.new_context()
-
-        self._ctx.set_default_timeout(DEFAULT_TIMEOUT_MS)
-        self._ctx.route("**/*", _route_slim)
-        self._page = self._ctx.new_page()
-
+        self._closed = False
         try:
-            self._page.add_init_script(f"Object.defineProperty(navigator, 'userAgent', {{get: () => '{UA_DESKTOP}'}});")
-        except Exception:
-            pass
+            self._p = sync_playwright().start()
+            self._browser = self._p.chromium.launch(
+                headless=headless,
+                proxy=_proxy_conf(),
+                args=["--disable-dev-shm-usage"],
+            )
+            # Use storage_state when available (avoid re-login)
+            if STATE_PATH.exists():
+                self._ctx = self._browser.new_context(storage_state=str(STATE_PATH))
+            else:
+                self._ctx = self._browser.new_context()
 
+            self._ctx.set_default_timeout(DEFAULT_TIMEOUT_MS)
+            self._ctx.route("**/*", _route_slim)
+            self._page = self._ctx.new_page()
+
+            try:
+                self._page.add_init_script(f"Object.defineProperty(navigator, 'userAgent', {{get: () => '{UA_DESKTOP}'}});")
+            except Exception:
+                pass
+        except Exception:
+            # If anything fails mid-startup, ensure the driver/browser are not leaked.
+            self._shutdown()
+            raise
     def _shutdown(self):
-        with suppress_exc():
-            if self._ctx: self._ctx.close()
-        with suppress_exc():
-            if self._browser: self._browser.close()
-        with suppress_exc():
-            if self._p: self._p.stop()
-        self._p = self._browser = self._ctx = self._page = None
+        """Idempotent, best-effort Playwright teardown.
+
+        Why this is so defensive:
+        - Playwright's *sync* API still runs an asyncio driver connection under the hood.
+        - In PyInstaller/frozen macOS builds, if any of those driver transports get
+          garbage-collected *after* Playwright has already closed its internal event loop,
+          Python can print noisy lines like:
+            - RuntimeError: Event loop is closed
+            - Task was destroyed but it is pending!
+
+        So we:
+        1) Close page/context/browser
+        2) Force a GC pass *before* stopping Playwright (while its loop is still alive)
+        3) Stop Playwright
+        4) GC again, with a tiny grace sleep, to drain late finalizers
+        """
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
+        with _silence_stderr():
+
+            # Close leaf objects first.
+            with suppress_exc():
+                if self._page:
+                    with suppress_exc():
+                        self._page.close()
+            with suppress_exc():
+                if self._ctx:
+                    self._ctx.close()
+            with suppress_exc():
+                if self._browser:
+                    self._browser.close()
+
+            # Critical: collect while Playwright's internal loop/transport is still up.
+            with suppress_exc():
+                gc.collect()
+
+            # Now stop Playwright (closes the driver connection + its internal loop).
+            with suppress_exc():
+                if self._p:
+                    self._p.stop()
+
+            # One more GC after stop to clean up any leftover wrappers.
+            with suppress_exc():
+                time.sleep(0.15)
+            with suppress_exc():
+                gc.collect()
+
+            self._p = self._browser = self._ctx = self._page = None
+            with suppress_exc():
+                _LIVE_CLIENTS.discard(self)
 
     def close(self):
+
         self._shutdown()
 
     # ────────────────── Auth helpers ──────────────────
@@ -1052,12 +1165,25 @@ class NaptaClient:
         self._ensure_session(headless=True)
         _, err = _safe_run(lambda: self._open_timesheet(), "page load")
         if err:
+            if err.startswith("↩️ Cancelled"):
+                self._shutdown()
             return False, err
 
+        # if self._on_login_page():
+        #     name = f"napta_login_required_{ts()}.png"
+        #     self._page.screenshot(path=_shot(name), full_page=True)
+        #     return False, f"⛔ Napta login required. Please open https://app.napta.io once in Chrome. Screenshot -> {name}"
+
         if self._on_login_page():
-            name = f"napta_login_required_{ts()}.png"
+            name = f"napta_login_required_{_now()}.png"
             self._page.screenshot(path=_shot(name), full_page=True)
+
+            # IMPORTANT: don’t keep a half-initialised Playwright session alive.
+            # In PyInstaller builds this often causes “Task was destroyed…” / “event loop closed” noise.
+            self._shutdown()
+
             return False, f"⛔ Napta login required. Please open https://app.napta.io once in Chrome. Screenshot -> {name}"
+
 
         # Navigate if user asked for "next" week
         if which == "next":
@@ -1251,12 +1377,25 @@ class NaptaClient:
         self._ensure_session(headless=True)
         _, err = _safe_run(lambda: self._open_timesheet(), "page load")
         if err:
+            if err.startswith("↩️ Cancelled"):
+                self._shutdown()
             return False, err
 
 
+        # if self._on_login_page():
+        #     name = f"napta_login_required_{ts()}.png"; self._page.screenshot(path=_shot(name), full_page=True)
+        #     return False, f"⛔ Napta login required. Please open https://app.napta.io once in Chrome. Screenshot -> {name}"
+
         if self._on_login_page():
-            name = f"napta_login_required_{ts()}.png"; self._page.screenshot(path=_shot(name), full_page=True)
+            name = f"napta_login_required_{_now()}.png"
+            self._page.screenshot(path=_shot(name), full_page=True)
+
+            # IMPORTANT: don’t keep a half-initialised Playwright session alive.
+            # In PyInstaller builds this often causes “Task was destroyed…” / “event loop closed” noise.
+            self._shutdown()
+
             return False, f"⛔ Napta login required. Please open https://app.napta.io once in Chrome. Screenshot -> {name}"
+
 
         state = _wait_for_save_submit_chip(self._page, timeout_ms=SHORT_TIMEOUT_MS)
         if state is None:
@@ -1285,12 +1424,25 @@ class NaptaClient:
         self._ensure_session(headless=True)
         _, err = _safe_run(lambda: self._open_timesheet(), "page load")
         if err:
+            if err.startswith("↩️ Cancelled"):
+                self._shutdown()
             return False, err
 
 
+        # if self._on_login_page():
+        #     name = f"napta_login_required_{ts()}.png"; self._page.screenshot(path=_shot(name), full_page=True)
+        #     return False, f"⛔ Napta login required. Please open https://app.napta.io once in Chrome. Screenshot -> {name}"
+
         if self._on_login_page():
-            name = f"napta_login_required_{ts()}.png"; self._page.screenshot(path=_shot(name), full_page=True)
+            name = f"napta_login_required_{_now()}.png"
+            self._page.screenshot(path=_shot(name), full_page=True)
+
+            # IMPORTANT: don’t keep a half-initialised Playwright session alive.
+            # In PyInstaller builds this often causes “Task was destroyed…” / “event loop closed” noise.
+            self._shutdown()
+
             return False, f"⛔ Napta login required. Please open https://app.napta.io once in Chrome. Screenshot -> {name}"
+
 
         if not self._go_to_next_week():
             name = f"napta_error_{ts()}.png"; self._page.screenshot(path=_shot(name), full_page=True)
@@ -1328,12 +1480,25 @@ class NaptaClient:
         self._ensure_session(headless=True)
         _, err = _safe_run(lambda: self._open_timesheet(), "page load")
         if err:
+            if err.startswith("↩️ Cancelled"):
+                self._shutdown()
             return False, err
 
 
+        # if self._on_login_page():
+        #     name = f"napta_login_required_{ts()}.png"; self._page.screenshot(path=_shot(name), full_page=True)
+        #     return False, f"⛔ Napta login required. Please open https://app.napta.io once in Chrome. Screenshot -> {name}"
+
         if self._on_login_page():
-            name = f"napta_login_required_{ts()}.png"; self._page.screenshot(path=_shot(name), full_page=True)
+            name = f"napta_login_required_{_now()}.png"
+            self._page.screenshot(path=_shot(name), full_page=True)
+
+            # IMPORTANT: don’t keep a half-initialised Playwright session alive.
+            # In PyInstaller builds this often causes “Task was destroyed…” / “event loop closed” noise.
+            self._shutdown()
+
             return False, f"⛔ Napta login required. Please open https://app.napta.io once in Chrome. Screenshot -> {name}"
+
 
         state = _wait_for_save_submit_chip(self._page, timeout_ms=SHORT_TIMEOUT_MS)
         if state is None:
@@ -1367,6 +1532,8 @@ class NaptaClient:
         self._ensure_session(headless=True)
         _, err = _safe_run(lambda: self._open_timesheet(), "page load")
         if err:
+            if err.startswith("↩️ Cancelled"):
+                self._shutdown()
             return False, err
 
         if self._on_login_page():

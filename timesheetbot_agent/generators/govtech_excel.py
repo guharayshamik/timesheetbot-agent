@@ -9,14 +9,7 @@ from typing import Dict, List, Tuple, Optional, Sequence
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill, Border
 
-# Try relative PH import first (package usage), then absolute (direct script use)
-try:
-    from ..ph_sg import PUBLIC_HOLIDAYS as PH_DEFAULT  # type: ignore
-except Exception:  # pragma: no cover
-    try:
-        from ph_sg import PUBLIC_HOLIDAYS as PH_DEFAULT  # type: ignore
-    except Exception:  # pragma: no cover
-        PH_DEFAULT: Dict[str, str] = {}
+PH_DEFAULT: Dict[str, str] = {}
 
 # Reuse your exact styles
 from ..styles import (

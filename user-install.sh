@@ -4,27 +4,51 @@ set -e
 APP_NAME="tsbot"
 INSTALL_DIR="$HOME/Applications/tsbot"
 BIN_DIR="$HOME/.local/bin"
+TARGET="$INSTALL_DIR/$APP_NAME"
+LINK="$BIN_DIR/$APP_NAME"
 
 echo "🚀 Installing tsbot..."
 
+# Install app bundle
 rm -rf "$INSTALL_DIR"
 mkdir -p "$INSTALL_DIR"
 cp -R ./* "$INSTALL_DIR/"
-chmod +x "$INSTALL_DIR/$APP_NAME"
+chmod +x "$TARGET"
 
+# Create symlink
 mkdir -p "$BIN_DIR"
-ln -sf "$INSTALL_DIR/$APP_NAME" "$BIN_DIR/$APP_NAME"
+ln -sf "$TARGET" "$LINK"
 
-xattr -dr com.apple.quarantine "$INSTALL_DIR" || true
+# Remove quarantine (best-effort)
+xattr -dr com.apple.quarantine "$INSTALL_DIR" >/dev/null 2>&1 || true
 
-if ! echo "$PATH" | grep -q "$BIN_DIR"; then
-  echo '' >> "$HOME/.zprofile"
-  echo '# tsbot' >> "$HOME/.zprofile"
-  echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.zprofile"
-  echo "ℹ️ Added tsbot to PATH. Restart terminal."
-fi
+# ---- PATH setup (robust) ----
+PATH_LINE='export PATH="$HOME/.local/bin:$PATH"'
+
+add_path_line() {
+  local file="$1"
+  mkdir -p "$(dirname "$file")"
+  touch "$file"
+
+  # Add only if the exact PATH line is not already present
+  if ! grep -qsF "$PATH_LINE" "$file"; then
+    echo "" >> "$file"
+    echo "# tsbot" >> "$file"
+    echo "$PATH_LINE" >> "$file"
+  fi
+}
+
+# Most macOS users use zsh; interactive shells read ~/.zshrc reliably.
+add_path_line "$HOME/.zshrc"
+# Login shells read ~/.zprofile.
+add_path_line "$HOME/.zprofile"
+# If someone uses bash, these help.
+add_path_line "$HOME/.bashrc"
+add_path_line "$HOME/.bash_profile"
 
 echo ""
 echo "✅ Installed!"
 echo "👉 Run anywhere using: tsbot"
-
+echo ""
+echo "ℹ️ If 'tsbot' is not found in a new terminal, run:"
+echo "   source ~/.zshrc  (or restart your terminal)"
