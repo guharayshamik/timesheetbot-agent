@@ -91,6 +91,10 @@ UA_DESKTOP = (
 def ts() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")
 
+def _now() -> str:
+    """Backward-compatible timestamp helper (some code paths expect _now())."""
+    return ts()
+
 class suppress_exc:
     def __init__(self, raise_on_fail: bool = False):
         self.raise_on_fail = raise_on_fail
