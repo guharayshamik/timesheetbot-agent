@@ -267,8 +267,6 @@ def show_vibrant_help() -> None:
         "factory reset      — Wipe ALL data, including generated files",
     ]), style="bold yellow")
 
-
-
     console.print(
         Panel(
             reset_text,
@@ -290,54 +288,6 @@ def show_vibrant_help() -> None:
         Panel(cmds, title="Commands", title_align="left",
               border_style="magenta", box=ROUNDED, padding=(0, 1))
     )
-
-# def show_vibrant_help() -> None:
-#     """Pretty 'Chat mode ON + examples + commands' block."""
-#     chip = Text.assemble(("⚡  Chat mode", "bold"), ("  ON", "bold bright_green"))
-#     console.print(Panel(chip, border_style="bright_green", padding=(0, 1), box=box.SQUARE))
-#     console.print(Text("Describe your work/leave in plain English, e.g.:", style="bold cyan"))
-
-#     # ex_tbl = Table.grid(padding=(0, 1))
-#     # ex_tbl.add_column()
-#     # ex_tbl.add_row(_bullet_line('"generate timesheet for August"'))
-#     # ex_tbl.add_row(_bullet_line('"annual leave 11–13 Aug"'))
-#     # ex_tbl.add_row(_bullet_line('"sick leave on 11 Aug"'))
-#     # console.print(
-#     #     Panel(ex_tbl, title="Examples", title_align="left",
-#     #           border_style="cyan", box=box.ROUNDED, padding=(0, 1))
-#     # )
-
-#     ex_tbl = Table.grid(padding=(0, 1))
-#     ex_tbl.add_column()
-#     ex_tbl.add_row(_bullet_line('"generate timesheet for August"'))
-#     ex_tbl.add_row(_bullet_line('"annual leave 11–13 Aug"'))
-#     ex_tbl.add_row(_bullet_line('"sick leave on 11 Aug"'))
-#     # ex_tbl.add_row(_bullet_line("show — Display current saved data"))
-#     # ex_tbl.add_row(_bullet_line("clear — Clear current entries"))
-#     ex_tbl.add_row(_bullet_line("deregister — Remove your profile from bot"))
-#     ex_tbl.add_row(_bullet_line("generate — Create a new timesheet"))
-#     ex_tbl.add_row(_bullet_line("comment — Add remarks to a specific date; This will add comments in the \"Remarks\" column inside excel"))
-#     ex_tbl.add_row(_bullet_line("email — Send generated timesheet to email"))
-#     ex_tbl.add_row(_bullet_line("help — Show available commands"))
-#     ex_tbl.add_row(_bullet_line("back — Return to previous menu"))
-#     ex_tbl.add_row(_bullet_line("quit — Exit the tool"))
-#     console.print(
-#         Panel(ex_tbl, title="Examples", title_align="left",
-#             border_style="cyan", box=box.ROUNDED, padding=(0, 1))
-#     )
-
-
-#     cmds = Text(
-#         "show   clear   deregister   generate   comment   help   back   email   quit",
-#         style="bold magenta",
-#     )
-#     console.print(
-#         Panel(cmds, title="Commands", title_align="left",
-#               border_style="magenta", box=box.ROUNDED, padding=(0, 1))
-#     )
-
-
-
 
 
 # ── Fitnet (Leave) help blocks ──────────────────────────────────────────────────

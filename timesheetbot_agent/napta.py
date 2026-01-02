@@ -116,7 +116,6 @@ def _silence_stderr():
         yield
 
 
-
 def _route_slim(route):
     req = route.request
     if req.resource_type in ("image", "media", "font"):
@@ -134,15 +133,6 @@ class NaptaAuthError(RuntimeError):
 def _proxy_conf():
     url = os.getenv("PLAYWRIGHT_PROXY") or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
     return {"server": url} if url else None
-
-# def _safe_run(fn, label: str = "operation"):
-#     """Run a Playwright action with graceful timeout recovery."""
-#     try:
-#         return fn(), None
-#     except PlaywrightTimeoutError:
-#         return None, f"⏰ The {label} took too long (timed out). Please retry in a few seconds."
-#     except Exception as e:
-#         return None, f"⚠️ Unexpected error during {label}: {e}"
 
 def _safe_run(fn, label: str = "operation"):
     try:
@@ -349,13 +339,6 @@ def _click_save(page) -> bool:
             return True
     return False
 
-# def _click_submit(page) -> bool:
-#     with suppress_exc():
-#         btn = page.get_by_role("button", name=re.compile(r"Submit for approval", re.I)).first
-#         if btn.count():
-#             btn.click(timeout=SHORT_TIMEOUT_MS)
-#             return True
-#     return False
 def _click_submit(page) -> bool:
     with suppress_exc():
         btn = page.get_by_role("button", name=re.compile(r"Submit for approval", re.I)).first
@@ -636,66 +619,6 @@ def _verbatim_grid(tbl, day_cols):
             values = values + [""] * (day_count - len(values))
         return values
 
-    # # ───────── Native <table> (alternate “control/value” cells) ─────────
-    # body_rows = tbl.locator("tbody tr")
-    # if body_rows.count():
-    #     import re
-
-    #     def _read_cell_number(cell):
-    #         # 1) prefer the hidden number input’s value
-    #         with suppress_exc():
-    #             inp = cell.locator("input[type='number']").first
-    #             if inp.count():
-    #                 v = (inp.get_attribute("value") or "").strip()
-    #                 if v:
-    #                     return f"{float(v):g}d"
-    #         # 2) fallback: visible text (ignore aria-hidden)
-    #         with suppress_exc():
-    #             el = cell.locator(
-    #                 "p:not([aria-hidden='true']),"
-    #                 "span:not([aria-hidden='true']),"
-    #                 "div:not([aria-hidden='true'])"
-    #             ).first
-    #             if el.count():
-    #                 t = (el.inner_text() or "").strip()
-    #                 m = re.search(r"\d+(?:\.\d+)?", t)
-    #                 if m:
-    #                     return f"{float(m.group(0)):g}d"
-    #         # 3) last resort: raw inner text
-    #         with suppress_exc():
-    #             raw = (cell.inner_text() or "").strip()
-    #             m = re.search(r"\d+(?:\.\d+)?", raw)
-    #             if m:
-    #                 return f"{float(m.group(0)):g}d"
-    #         return "0d"
-
-    #     for rix in range(body_rows.count()):
-    #         r = body_rows.nth(rix)
-    #         tds = r.locator("td")
-    #         if tds.count() < 3:
-    #             continue
-
-    #         # Project = first td
-    #         proj = _txt(tds.nth(0))
-    #         if not proj:
-    #             with suppress_exc():
-    #                 p0 = tds.nth(0).locator("p, div, span").first
-    #                 if p0.count():
-    #                     proj = _txt(p0)
-    #         if not proj:
-    #             continue
-
-    #         # Values = every 2nd td starting at index 2 (0-based):
-    #         # indices: 2,4,6,8,10 → Mon..Fri; ignore totals and anything after.
-    #         day_count = max(0, len(day_cols))
-    #         idxs = [i for i in range(2, tds.count(), 2)][:day_count]
-
-    #         values = [_read_cell_number(tds.nth(i)) for i in idxs]
-    #         # still run through sanitizer to pad/clip if headers are <5 or >5
-    #         values = _sanitize_values(values, proj)
-    #         rows.append((proj, values))
-
-    #     return rows
     # ───────── Native <table> (alternate control/value cells) ─────────
     body_rows = tbl.locator("tbody tr")
     if body_rows.count():

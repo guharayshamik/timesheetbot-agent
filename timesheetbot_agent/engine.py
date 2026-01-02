@@ -23,94 +23,11 @@ EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.I)
 RANGE_SEP = cfg.dates.range_regex.pattern
 
 PUBLIC_HOLIDAYS = load_sg_holidays()
-# MONTHS = {
-#     "jan": "January", "feb": "February", "mar": "March", "apr": "April",
-#     "may": "May", "jun": "June", "jul": "July", "aug": "August",
-#     "sep": "September", "sept": "September", "oct": "October",
-#     "nov": "November", "dec": "December",
-# }
 MONTHS = cfg.dates.months
 
 LEAVE_SYNONYMS = cfg.leave.synonyms
-
-# LEAVE_SYNONYMS = {
-#     # --- Sick ---
-#     "sick": "Sick Leave",
-#     "mc": "Sick Leave",
-#     "medical": "Sick Leave",
-#     # variants / typos
-#     "sick leave": "Sick Leave",
-#     "sickleave": "Sick Leave",
-#     "sikcleave": "Sick Leave",
-#     "sicleave": "Sick Leave",
-#     "sik leave": "Sick Leave",
-#     "sic leave": "Sick Leave",
-
-#     # --- Annual ---
-#     "annual": "Annual Leave",
-#     "vacation": "Annual Leave",
-#     "al": "Annual Leave",
-#     # variants / typos
-#     "annual leave": "Annual Leave",
-#     "annualleave": "Annual Leave",
-#     "anual leave": "Annual Leave",
-#     "anualleave": "Annual Leave",
-#     "ann leave": "Annual Leave",
-#     "pto": "Annual Leave",
-#     "leave": "Annual Leave",   # liberal
-#     "oil": "Annual Leave",
-#     "oli": "Annual Leave",
-
-#     # --- Childcare ---
-#     "childcare": "Childcare Leave",
-#     "cc": "Childcare Leave",
-#     "childcare leave": "Childcare Leave",
-#     "child care": "Childcare Leave",
-#     "child care leave": "Childcare Leave",
-
-#     # --- NS ---
-#     "ns": "NS Leave",
-#     "national service": "NS Leave",
-#     "ns leave": "NS Leave",
-
-#     # --- Weekend Efforts (OT on Sat/Sun) ---
-#     "weekend": "Weekend Efforts",
-#     "weekend effort": "Weekend Efforts",
-#     "weekend efforts": "Weekend Efforts",
-#     "weekend work": "Weekend Efforts",
-#     "worked weekend": "Weekend Efforts",
-#     "we": "Weekend Efforts",
-#     "wknd": "Weekend Efforts",
-#     "wknd effort": "Weekend Efforts",
-#     "week-end": "Weekend Efforts",
-
-#     # --- Public Holiday Efforts (OT on PH) ---
-#     "public holiday effort": "Public Holiday Efforts",
-#     "public holiday efforts": "Public Holiday Efforts",
-#     "public holiday work": "Public Holiday Efforts",
-#     "ph effort": "Public Holiday Efforts",
-#     "ph efforts": "Public Holiday Efforts",
-#     "ph work": "Public Holiday Efforts",
-#     "ph ot": "Public Holiday Efforts",
-#     "ph-ot": "Public Holiday Efforts",
-
-#     # --- Half day ---
-#     "half day": "Half Day",
-#     "halfday": "Half Day",
-#     "half-day": "Half Day",
-#     "hafday": "Half Day",
-#     "haf day": "Half Day",
-#     "hd": "Half Day",
-#     "1/2 day": "Half Day",
-# }
-
 ALLOWED_TYPES = cfg.leave.canonical
-# ALLOWED_TYPES = {v for v in LEAVE_SYNONYMS.values()} | {
-#     "Sick Leave", "Annual Leave", "Childcare Leave", "NS Leave",
-#     "Weekend Efforts", "Public Holiday Efforts", "Half Day",
-# }
 
-# FINANCE_CC_EMAIL = "sg-finance@palo-it.com"
 FINANCE_CC_EMAIL = cfg.org.finance_cc_email
 
 # ---------- helpers ----------
@@ -142,19 +59,6 @@ def _parse_single_no_month(text: str) -> Optional[int]:
     if m2 and not _parse_range(text):
         return _std_day(m2.group(1))
     return None
-
-
-# def _month_from_text(text: str) -> Optional[str]:
-#     m = re.search(r"\b(for|in)\s+([A-Za-z]{3,9})\b", text, flags=re.I)
-#     if m:
-#         return _full_month_name(m.group(2))
-#     m2 = re.search(r"\b([A-Za-z]{3,9})\s+(timesheet|sheet)\b", text, flags=re.I)
-#     if m2:
-#         return _full_month_name(m2.group(1))
-#     m3 = re.search(r"\b([A-Za-z]{3,9})\b", text, flags=re.I)
-#     if m3 and re.search(r"\b(generate|submit|create)\b", text, flags=re.I):
-#         return _full_month_name(m3.group(1))
-#     return None
 
 def _month_from_text(text: str) -> Optional[str]:
     # 1) explicit "for|in <Month>"
