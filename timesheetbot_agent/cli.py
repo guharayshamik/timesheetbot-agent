@@ -6,7 +6,6 @@ from .features import ENABLE_NAPTA
 from .config_loader import load_config
 from .errors import catch_all
 from .ui import banner, input_prompt, panel, suppress_ctrlc_echo, UserCancelled
-# from .napta import NaptaClient  # <-- DO NOT import at module level
 from rich.table import Table
 from rich.text import Text
 from rich.panel import Panel
