@@ -7,11 +7,8 @@ from datetime import datetime
 from typing import List, Tuple, Optional, Dict, Any, Sequence
 
 from .storage import load_session, save_session, clear_session
-#from .ph_sg import PUBLIC_HOLIDAYS  # pass PHs to the generator
 from .config_loader import load_config, load_sg_holidays
 from .storage import get_generated_dir
-
-
 
 log = logging.getLogger("timesheetbot_engine")
 
@@ -19,7 +16,6 @@ log = logging.getLogger("timesheetbot_engine")
 
 cfg = load_config()
 EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.I)
-# RANGE_SEP = r"(?:-|–|—|−|~|to|until|till|through|thru)"
 RANGE_SEP = cfg.dates.range_regex.pattern
 
 PUBLIC_HOLIDAYS = load_sg_holidays()
@@ -82,6 +78,28 @@ def _month_from_text(text: str) -> Optional[str]:
             return mon
     return None
 
+def _year_from_text(text: str, month_mentioned: Optional[str] = None) -> Optional[int]:
+    """
+    If the user mentions a year (e.g. 'dec 2025', 'generate ... 2025'),
+    return it. We keep this intentionally simple/minimal.
+    """
+    # Prefer year near the end (common CLI usage): "... 2025"
+    m = re.search(r"(?:\s|^)(20\d{2})\s*$", text.strip())
+    if m:
+        y = int(m.group(1))
+        if 2000 <= y <= 2099:
+            return y
+
+    # If a month is present, accept the first 20xx anywhere in the command
+    if month_mentioned:
+        m2 = re.search(r"\b(20\d{2})\b", text)
+        if m2:
+            y = int(m2.group(1))
+            if 2000 <= y <= 2099:
+                return y
+
+    return None
+
 def _std_day(tok: str) -> Optional[int]:
     d = re.sub(r"(st|nd|rd|th)$", "", tok.strip(), flags=re.I)
     if d.isdigit():
@@ -97,15 +115,18 @@ def _split(date_str: str) -> Tuple[int, str]:
     d, m = date_str.split("-", 1)
     return int(d), m
 
-def _valid(day: int, month_name: str) -> bool:
+def _valid(day: int, month_name: str, year: Optional[int] = None) -> bool:
+    """
+    Validate a day/month combo. If year is provided, validate against that year,
+    otherwise validate against current year (existing behavior).
+    """
     try:
         month_num = datetime.strptime(month_name, "%B").month
-        # Use current year instead of 2025:
-        datetime(datetime.now().year, month_num, day)
+        use_year = year or datetime.now().year
+        datetime(use_year, month_num, day)
         return True
     except ValueError:
         return False
-
 
 def _parse_day_pairs(text: str) -> List[Tuple[int, str]]:
     pairs: List[Tuple[int, str]] = []
@@ -140,14 +161,6 @@ def _parse_range_no_month(text: str) -> Optional[Tuple[int, int]]:
     d1 = _std_day(m.group(1)); d2 = _std_day(m.group(2))
     if d1 and d2: return (min(d1, d2), max(d1, d2))
     return None
-
-# def _parse_single_no_month(text: str) -> Optional[int]:
-#     m = re.search(r"\bon\s+(\d{1,2})(?:st|nd|rd|th)?\b(?!\s*[A-Za-z])", text, flags=re.I)
-#     if m: return _std_day(m.group(1))
-#     month_keys = "|".join(MONTHS.keys())   # <- UPDATED
-#     m2 = re.search(rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\b(?!\s*(?:{month_keys}))", text, flags=re.I)
-#     if m2 and not _parse_range(text): return _std_day(m2.group(1))
-#     return None
 
 def _extract_days_list(blob: str) -> List[int]:
     parts = re.split(r"(?:\s*,\s*|\s+and\s+|\s*&\s*)", blob.strip(), flags=re.I)
@@ -226,7 +239,7 @@ def _detect_leave_type(text: str) -> Optional[str]:
     import re
     specific_hit = None
     generic_hit = None
-    for k, canon in LEAVE_SYNONYMS.items():   # <- UPDATED
+    for k, canon in LEAVE_SYNONYMS.items():
         if re.search(rf"\b{re.escape(k)}\b", text, flags=re.I):
             if k == "leave":
                 generic_hit = canon
@@ -235,7 +248,7 @@ def _detect_leave_type(text: str) -> Optional[str]:
             break
     if specific_hit:
         return specific_hit
-    for a in ALLOWED_TYPES:                    # <- UPDATED
+    for a in ALLOWED_TYPES:
         if re.search(rf"\b{re.escape(a)}\b", text, flags=re.I):
             return a
     return generic_hit
@@ -264,10 +277,8 @@ class Engine:
                 new_tuple = overlap["new"]  # (start, end, type)
                 # Multi-overlap path
                 if "old_list" in overlap:
-                    # Remove all old entries (by index, descending so indices stay valid)
                     for idx, _old in sorted(overlap["old_list"], key=lambda x: x[0], reverse=True):
                         sess["leave_details"].pop(idx)
-                    # Add the single consolidated replacement
                     sess["leave_details"].append(new_tuple)
 
                     _, new_month = _split(new_tuple[0])
@@ -283,50 +294,39 @@ class Engine:
                         f"🔄 Replaced {old_summary} with {new_tuple[2]}.",
                         "You can add more leaves or type `generate`.",
                     ]
-                # Single-overlap path (keeps existing behavior)
                 else:
                     new_s, new_e, new_t = overlap["new"]
                     old_s, old_e, old_t = overlap["old"]
                     idx = overlap["idx"]
 
-                    # Parse days/months
                     ns_day, ns_mon = _split(new_s)
-                    ne_day, ne_mon = _split(new_e)
                     os_day, os_mon = _split(old_s)
                     oe_day, oe_mon = _split(old_e)
 
-                    # Same month guaranteed by overlap finder; ensure new is single-day and old spans multiple days
                     if new_s == new_e and (old_s != old_e) and (ns_mon == os_mon == oe_mon):
-                        # Build: [old left], [new single], [old right] as needed
                         updated = []
 
-                        # Left chunk: old_s .. (ns_day-1)
                         if ns_day > os_day:
                             left_start = old_s
                             left_end = _fmt(ns_day - 1, os_mon)
                             updated.append((left_start, left_end, old_t))
 
-                        # Middle: the new single day
                         updated.append((new_s, new_e, new_t))
 
-                        # Right chunk: (ns_day+1) .. old_e
                         if ns_day < oe_day:
                             right_start = _fmt(ns_day + 1, os_mon)
                             right_end = old_e
                             updated.append((right_start, right_end, old_t))
 
-                        # Replace the old record at idx with the updated pieces
                         sess["leave_details"].pop(idx)
                         for rec in reversed(updated):
                             sess["leave_details"].insert(idx, rec)
 
-                        # Track month
                         sess["recent_leave_month"] = ns_mon
                         sess["month"] = ns_mon
                         sess.pop("pending_overlap")
                         save_session(sess)
 
-                        # Compose a friendly summary
                         parts = []
                         if ns_day > os_day:
                             parts.append(f"{old_t} {old_s}–{_fmt(ns_day - 1, os_mon)}")
@@ -339,7 +339,6 @@ class Engine:
                             "You can add more leaves or type `generate`.",
                         ]
                     else:
-                        # Fallback: original behavior (replace the single overlapped record)
                         sess["leave_details"][idx] = (new_s, new_e, new_t)
                         _, new_month = _split(new_s)
                         sess["recent_leave_month"] = new_month
@@ -354,11 +353,7 @@ class Engine:
                 sess.pop("pending_overlap"); save_session(sess)
                 return ["❌ Kept your original leave. Discarded the new one."]
 
-
         # ---- generate intent?
-        # wants_generate = bool(re.search(r"\b(generate|submit|create)\b.*\b(timesheet|sheet)\b", text, flags=re.I)) \
-        #                  or bool(re.search(r"^/generate\b|\bgenerate\b", text, flags=re.I))
-        
         wants_generate = (
             bool(re.search(r"\b(generate|submit|create)\b.*\b(timesheet|sheet|ts)\b", text, flags=re.I))
             or bool(re.search(r"^/(?:generate)\b|\bgenerate\b", text, flags=re.I))
@@ -369,8 +364,12 @@ class Engine:
         if month_mentioned:
             sess["month"] = month_mentioned
 
+        # ---- NEW: year support (e.g. "dec 2025")
+        year_mentioned = _year_from_text(text, month_mentioned=month_mentioned)
+        if year_mentioned:
+            sess["year"] = year_mentioned
+
         # ---- ADD COMMENT command
-        #if re.search(r"^(?:/comment|/remark|add\s+comment|remark)\b", text, flags=re.I):
         if re.search(r"^(?:/(?:comment|comments)|add\s+comment|comments?|remarks?)\b", text, flags=re.I):
             start_key = None
             comment = None
@@ -378,20 +377,19 @@ class Engine:
             found = _first_date_with_span(text)
             if found:
                 d, mon, span = found
-                if not _valid(d, mon):
+                if not _valid(d, mon, year=sess.get("year")):
                     return [f"⚠️ {d}-{mon} is not a valid date."]
                 start_key = _fmt(d, mon)
                 comment = _extract_comment_after(text, span)
                 sess["recent_leave_month"] = mon
                 sess["month"] = mon
             else:
-                # allow 'comment 11 OIL' when month is known in session
                 single_no_mon = _parse_single_no_month(text)
                 if single_no_mon:
                     fallback_mon = sess.get("recent_leave_month") or sess.get("month")
                     if not fallback_mon:
                         return ["⚠️ Please include a month (e.g., `comment 11 Sep OIL`)."]
-                    if not _valid(single_no_mon, fallback_mon):
+                    if not _valid(single_no_mon, fallback_mon, year=sess.get("year")):
                         return [f"⚠️ {single_no_mon}-{fallback_mon} is not a valid date."]
                     m = re.search(rf"\b{single_no_mon}(?:st|nd|rd|th)?\b", text, flags=re.I)
                     start_key = _fmt(single_no_mon, fallback_mon)
@@ -416,7 +414,7 @@ class Engine:
         if re.match(r"^/?email\b", text, flags=re.I):
             sess_meta = load_session()
             path_str = sess_meta.get("last_generated_path")
-            meta = sess_meta.get("last_generated_meta", {})  # <-- you were missing this
+            meta = sess_meta.get("last_generated_meta", {})
 
             if not path_str:
                 return ["⚠️ No generated file found. Please `generate` the timesheet first."]
@@ -425,24 +423,16 @@ class Engine:
             if not attachment.exists():
                 return [f"⚠️ I can't find the file on disk: {attachment}. Please `generate` again."]
 
-
-            # --- parse recipients (supports multiple) ---
-            # Only look for recipient(s) AFTER the command token (works for 'email' and '/email')
             rest = re.sub(r"^/?email\b", "", text, flags=re.I).strip()
-
-            # Find ALL valid emails (space / comma / semicolon separated all ok)
-            candidates = EMAIL_RE.findall(rest)  # ["a@x.com", "b@y.com", ...]
-            # Deduplicate while preserving order
+            candidates = EMAIL_RE.findall(rest)
             to_list = [e.strip() for e in dict.fromkeys([c for c in candidates if c.strip()])]
 
-            # Fallback ONLY if no valid emails provided
             if not to_list:
                 fallback = (self.profile.get("manager_email") or "").strip() or (self.profile.get("email") or "").strip()
                 if not fallback:
                     return ["⚠️ No recipient email found. Try: `email someone@example.com` or add a manager email."]
                 to_list = [fallback]
 
-            # --- email content (unchanged) ---
             month = meta.get("month") or "Your"
             year = meta.get("year") or datetime.now().year
             employee = self.profile.get("name") or "Employee"
@@ -461,19 +451,16 @@ class Engine:
             ]
             body = "\n".join(body_lines)
 
-            # --- CC: user's email + Finance ---
             cc_candidates = [
                 (self.profile.get("email") or "").strip(),
-                FINANCE_CC_EMAIL,  # defined at top
+                FINANCE_CC_EMAIL,
             ]
             cc_list = [a for a in dict.fromkeys([x for x in cc_candidates if x])]
-
-            # Remove duplicates already present in To:
             cc_list = [c for c in cc_list if c not in to_list]
 
             try:
                 mailer.compose_with_best_available(
-                    to=to_list,                 # <-- multiple recipients now
+                    to=to_list,
                     subject=subject,
                     body=body,
                     attachment=attachment,
@@ -492,11 +479,8 @@ class Engine:
                     f"Please email this file manually: {attachment}",
                 ]
 
-
         # ---- leave type?
         leave_type = _detect_leave_type(text)
-
-
         leave_details: List[Sequence] = sess.get("leave_details", [])
 
         # ---- parse dates
@@ -526,7 +510,7 @@ class Engine:
         if leave_type and multi_with_month:
             days, mon = multi_with_month
             for d in days:
-                if not _valid(d, mon):
+                if not _valid(d, mon, year=sess.get("year")):
                     return [f"⚠️ {d}-{mon} is not a valid date."]
             recorded = []
             for d in days:
@@ -544,18 +528,16 @@ class Engine:
         # ---- range
         if leave_type and date_range:
             (d1, m1), (d2, m2) = date_range
-            if not _valid(d1, m1): return [f"⚠️ {d1}-{m1} is not a valid date."]
-            if not _valid(d2, m2): return [f"⚠️ {d2}-{m2} is not a valid date."]
+            if not _valid(d1, m1, year=sess.get("year")): return [f"⚠️ {d1}-{m1} is not a valid date."]
+            if not _valid(d2, m2, year=sess.get("year")): return [f"⚠️ {d2}-{m2} is not a valid date."]
             start = _fmt(d1, m1); end = _fmt(d2, m2)
 
             overlaps = _find_all_overlaps(leave_details, start, end)
             if overlaps:
-                # Summarize all overlaps for a single confirmation
-                kinds = ", ".join(sorted({t for _, (_, _, t) in overlaps}))
                 old_summary = "; ".join(f"{t} {s}–{e}" for _, (s, e, t) in overlaps)
                 sess["pending_overlap"] = {
                     "new": (start, end, leave_type),
-                    "old_list": overlaps,   # list[(idx, (s,e,t))]
+                    "old_list": overlaps,
                 }
                 save_session(sess)
                 return [f"⚠️ {start}–{end} overlaps existing: {old_summary}. Replace all with {leave_type}? (yes/no)"]
@@ -570,7 +552,7 @@ class Engine:
         # ---- single with month
         if leave_type and date_pairs:
             day, mon = date_pairs[0]
-            if not _valid(day, mon):
+            if not _valid(day, mon, year=sess.get("year")):
                 return [f"⚠️ {day}-{mon} is not a valid date."]
             start = _fmt(day, mon)
             idx, existing = _find_overlap(leave_details, start, start)
@@ -589,7 +571,7 @@ class Engine:
             fallback_mon = sess.get("recent_leave_month") or sess.get("month")
             if not fallback_mon:
                 return ["⚠️ I saw a day but no month. Include month (e.g., `10th June`)."]
-            if not _valid(single_no_mon, fallback_mon):
+            if not _valid(single_no_mon, fallback_mon, year=sess.get("year")):
                 return [f"⚠️ {single_no_mon}-{fallback_mon} is not a valid date."]
             start = _fmt(single_no_mon, fallback_mon)
             sess["pending_leave"] = {"leave_type": leave_type, "start_date": start, "end_date": None}
@@ -604,7 +586,7 @@ class Engine:
             if not fallback_mon:
                 return ["⚠️ I saw multiple days but no month. Include month (e.g., `5 and 7 Aug`)."]
             for d in multi_no_month:
-                if not _valid(d, fallback_mon):
+                if not _valid(d, fallback_mon, year=sess.get("year")):
                     return [f"⚠️ {d}-{fallback_mon} is not a valid date."]
             recorded = []
             for d in multi_no_month:
@@ -625,13 +607,16 @@ class Engine:
             if not month:
                 return ["⚠️ I couldn't detect the month. Try: `generate timesheet for September`"]
 
+            # If user supplied a year at end (or anywhere with a month), use it.
+            target_year = year_mentioned or sess.get("year") or datetime.now().year
+
             if sess.pop("awaiting_confirmation", False) is False and "pending_leave" in sess:
                 p = sess.pop("pending_leave")
                 leave_details.append((p["start_date"], p["start_date"], p["leave_type"]))
                 sess["leave_details"] = leave_details
 
             save_session(sess)
-            return self._generate(month, leave_details, sess.get("remarks", {}))
+            return self._generate(month, leave_details, sess.get("remarks", {}), year=int(target_year))
 
         # ---- awaiting yes/no for single day
         if sess.get("awaiting_confirmation"):
@@ -683,9 +668,9 @@ class Engine:
         month: str,
         leave_details: List[Tuple[str, str, str]],
         remarks: Dict[str, str],
+        year: Optional[int] = None,
     ) -> List[str]:
         out: List[str] = []
-        # out_dir = Path.cwd() / "generated_timesheets"
         out_dir = get_generated_dir()
         out_dir.mkdir(exist_ok=True)
 
@@ -694,7 +679,7 @@ class Engine:
         except ValueError:
             return [f"❌ Invalid month: {month}. Try: `generate timesheet for September`."]
 
-        year = datetime.now().year
+        target_year = int(year or datetime.now().year)
 
         # Clear any previous "last generated" info up front
         sess = load_session()
@@ -705,12 +690,11 @@ class Engine:
         try:
             from .generators.govtech_excel import generate_cli as generate_excel_cli
             path = None
-            # Try new signature (with remarks). If package not updated yet, fall back.
             try:
                 path = generate_excel_cli(
                     self.profile,
                     month_int,
-                    year,
+                    target_year,
                     leave_details,
                     out_dir,
                     public_holidays=PUBLIC_HOLIDAYS,
@@ -720,7 +704,7 @@ class Engine:
                 path = generate_excel_cli(
                     self.profile,
                     month_int,
-                    year,
+                    target_year,
                     leave_details,
                     out_dir,
                     public_holidays=PUBLIC_HOLIDAYS,
@@ -734,7 +718,7 @@ class Engine:
             sess["last_generated_meta"] = {
                 "month": month,
                 "month_int": month_int,
-                "year": year,
+                "year": target_year,
                 "path": str(path),
             }
             save_session(sess)
@@ -750,19 +734,19 @@ class Engine:
             payload = {
                 "profile": self.profile,
                 "month": month,
+                "year": target_year,
                 "leave_details": leave_details,
                 "remarks": remarks,
             }
             fname = out_dir / f"{month}_timesheet_payload.json"
             fname.write_text(json.dumps(payload, indent=2))
 
-            # Record fallback artifact too
             sess = load_session()
             sess["last_generated_path"] = str(fname)
             sess["last_generated_meta"] = {
                 "month": month,
                 "month_int": month_int,
-                "year": year,
+                "year": target_year,
                 "path": str(fname),
                 "fallback": True,
                 "error": str(e),

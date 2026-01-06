@@ -4,6 +4,8 @@ from PyInstaller.utils.hooks import collect_all
 datas = [('timesheetbot_agent/config', 'timesheetbot_agent/config')]
 binaries = []
 hiddenimports = []
+tmp_ret = collect_all('playwright')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('rich')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
@@ -17,7 +19,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['playwright', 'playwright.sync_api', 'playwright.async_api', 'timesheetbot_agent.napta'],
+    excludes=[],
     noarchive=False,
     optimize=0,
 )
